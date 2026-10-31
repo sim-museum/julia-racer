@@ -1,0 +1,25 @@
+base = "default"
+
+[knobs]
+perch = [159.94062499999998, 167.084375, 90.88437499999999, 97.63125]
+spring = [27.0, 27.0, 35.0, 39.0]
+packer = [0.0, 0.0, 0.0, 0.0]
+camber = [-0.8, 0.2, -0.5, 0.2]
+pressure = [151.7, 151.7, 151.7, 151.7]
+bump = [12, 12, 3, 3]
+rebound = [0, 0, 6, 6]
+toe_front = -8.0
+toe_rear = 6.0
+farb_dia = 0.375
+farb_arm = "2"
+rarb_dia = 0.6875
+rarb_arm = "6"
+fuel = 15.1
+brake_bias = 49.0
+steering_ratio = 10.0
+final_drive = 4.22
+gears = [2.23, 1.53, 1.32, 1.09, 0.958]
+diff_plates = 2
+diff_preload = 41.0
+diff_drive = 85.0
+diff_coast = 45.0
