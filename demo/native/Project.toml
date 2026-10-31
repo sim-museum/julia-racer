@@ -1,0 +1,11 @@
+[deps]
+GLFW = "f7f18e0c-5ee9-5ccd-a5bf-e8befd85ed98"
+JRPhysics = "7c3b1a52-9e4d-4f61-b0a8-2d5e6f7a8b91"
+JRRender = "5f0e2b8c-1d3a-4e7f-9a6b-c4d2e8f1a0b3"
+JRTrack = "21893f2b-7eec-4c6c-852f-72722bcfcc10"
+ModelingToolkit = "961ee093-0014-501f-94e3-6117800e7a78"
+ModernGL = "66fc600b-dfda-50eb-8b99-91cfa97b1301"
+OrdinaryDiffEq = "1dea7af3-3e70-54e6-95c3-0bf5283fa5ed"
+PortAudio = "80ea8bcb-4634-5cb3-8ee8-a132660d1d2d"
+SampledSignals = "bd7594eb-a658-542f-9e75-4c4d8908c167"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"

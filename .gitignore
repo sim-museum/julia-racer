@@ -1,0 +1,5 @@
+classic/
+data/juliaracer/
+__pycache__/
+*.so
+last_sim_run.log

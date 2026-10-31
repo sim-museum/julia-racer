@@ -1,0 +1,7 @@
+# The AI's pace anchors, measured from reference Lotus 49 sessions (the numbers only; no telemetry):
+# lateral grip = p99 of |LatAccel| on the skidpad; top speed = the rev limit through the gearing at runtime.
+lat_accel_p99 = 13.042016983032227      # m/s²
+lat_accel_samples = 11776
+lat_accel_source = "lotus49_skidpad 2026-06-24 15-46-39.ibt"
+rpm_limit = 9565.7529296875             # the highest RPM recorded
+rpm_limit_source = "lotus49_nurburgring nordschleife 2026-06-24 15-55-58.ibt"

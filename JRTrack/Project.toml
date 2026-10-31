@@ -1,0 +1,4 @@
+name = "JRTrack"
+uuid = "21893f2b-7eec-4c6c-852f-72722bcfcc10"
+version = "0.1.0"
+authors = ["julia racer"]

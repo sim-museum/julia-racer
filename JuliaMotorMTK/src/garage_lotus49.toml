@@ -1,0 +1,314 @@
+# SETUPMODEL-1: the Lotus 49 GARAGE -- reference's setup knobs and the constants of the static model that turns them into
+# reference's derived numbers. ONE source for both front ends: JuliaMotorMTK/src/garage.jl (the physics) and
+# demo/native/garage.py (the launcher's Garage tab) read this file; tools/garage_smoke.jl checks they agree.
+#
+# [params] were identified by tools/garage_fit_261017.jl (--emit) from the PO's 261017 garage screenshots and every
+# CarSetup in the gold .ibt store (261017/garage/frames_*.csv). Fit quality on the trusted frames: base car, fuel
+# 4.5-179.5 L, front springs 18/30/35 N/mm and +-2 mm perch twists within 0.5 mm / 5 N; perch extremes (spring loose,
+# car on the bump rubber) 3-6 mm / 10-25 N; asymmetric-camber setups (WW103, June skidpad) 1.5-3.5 mm / 15-40 N.
+
+[params]
+L = [149.157, 88.6348]            # spring compression [mm] = (s0 - perch + L) + MRk * wheel travel
+MR = [0.814256, 0.693304]         # shock travel per wheel travel
+MRq = [0.0, 0.0]
+MRk = [0.809881, 0.668786]        # spring travel per wheel travel (front coil-over: = MR)
+bar_shown = 1.0
+rh_mix = [0.0159551, 0.000744332] # ride-height point sits this far toward the other axle (fraction of the wheelbase)
+s0 = [61.3077, 59.1718]           # shock deflection at the reference [mm]
+R0 = [87.008, 114.448]            # ride height at the reference, unloaded tyre [mm]
+unsprung = [225.952, 225.843]     # N per corner
+kt = [362.393, 168.749]           # tyre vertical rate [N/mm] at 152 kPa
+kt_p = -0.00107309
+rp = [-0.0350197, 0.0288892]
+karb = [13.2411, 18.8832]         # bar rate at the wheel, base diameter + arm [N/mm]
+arm_beta = [0.0791486, 0.0907786] # RARBARMS-1 S3 (2026-10-25): refit with the PO's 19 IRPLAN-4 B3 twist sheets (every
+                                  # hole, both bars; karb + beta only, GF_INIT=shipped, GF_DROP=spring_perch_low): a hole
+                                  # moved the corner weights ~2x too much at 0.150. 261024 sheets 6.84 -> 5.91 digits,
+                                  # the earlier frames 6.86 -> 6.90. The sim's own bar laws (drive_rt3d ARB_LAW_*) unchanged.
+kbump = [328.012, 190.027]
+bump_gap = [18.4645, 14.0535]
+trackratio = 0.989648
+track_f = 1530.0
+scrub = [0.0, 0.0]
+cam_patch = 14.0976                # IRDATA-261018 S1 refit of the camber terms only, with the 261018 setup sheets
+cam_jack = 1.5132                  # mm of effective wheel length per deg of camber knob (camber jacks the corner)
+cam_jack2 = 0.0024
+cam_ref = [-0.4, -0.5]
+W0 = 5617.92                      # weight with an empty tank [N]
+front0 = 0.438952
+fuel_kgL = 0.750876
+fuel_front = 0.659651
+cam_gain = [0.0258845, 0.0238293] # deg of camber per mm of wheel travel (compression -> negative)
+cam_roll = [-1.30643, -1.12973]
+toe_gain = 0.016                  # front toe-in [mm] per mm of summed front wheel travel (droop -> toe-out)
+rpm_r = 3144.95                   # rev limit x rolling radius [rpm*m]: gear km/h = rpm_r*2pi/60/(ratio*final)*3.6 (every
+                                  # gear speed reference showed at finals 3.78/4.11/4.22, all 15 to the digit)
+
+# ---- the knobs, as reference's garage shows them ---------------------------------------------------------------------
+# known = true: range and step seen in the PO's capture. known = false: PROVISIONAL (the capture has the value(s) in
+# `seen` but not the limits; SETUPMODEL-1 Part C or the PO's exported setup sheets will settle them).
+[[knob]]
+key = "pressure"
+page = "Tires"
+label = "Cold pressure"
+unit = "kPa"
+per = "corner"
+min = 151.68                       # IRPLAN-4 B1 (261024 sheets): LF clicked to the stops at Monza = 152 / 179 kPa
+max = 179.26                       # (22 / 26 psi). 207 kPa is only the skidpad's own right-side default (261004, 261024 D)
+step = 3.4474
+known = true
+seen = [152, 179, 207]
+
+[[knob]]
+key = "farb_arm"
+page = "Chassis"
+group = "Front"
+label = "ARB arms"
+options = ["soft", "2", "3", "4", "5", "6", "firm"]
+known = true
+[[knob]]
+key = "farb_dia"
+page = "Chassis"
+group = "Front"
+label = "ARB diameter"
+options = ["Disconnected", "0.375\"", "0.4375\""]
+values = [0.0, 0.375, 0.4375]
+known = true
+[[knob]]
+key = "brake_bias"
+page = "Chassis"
+group = "Front"
+label = "Brake bias"
+unit = "%"
+min = 30.0
+max = 70.0
+step = 0.5
+known = true
+seen = [30.0, 50.0, 53.5, 54.0, 58.0, 70.0]
+[[knob]]
+key = "toe_front"
+page = "Chassis"
+group = "Front"
+label = "Toe-in"
+unit = "mm"
+min = -45.0
+max = 53.0
+step = 1.0
+known = true
+seen = [-45, -6, -2, -1, 53]
+[[knob]]
+key = "steering_ratio"
+page = "Chassis"
+group = "Front"
+label = "Steering ratio"
+options = ["8:1", "10:1", "16:1"]  # IRPLAN-4 B2: an arrow knob, 8:1 .. 16:1 (its intermediate steps not captured)
+values = [8.0, 10.0, 16.0]
+known = false
+
+[[knob]]
+key = "perch"
+page = "Chassis"
+per = "corner"
+label = "Spring perch offset"
+unit = "mm"
+step = 0.396875
+min_front = -36.909
+max_front = 309.166
+min_rear = 41.672
+max_rear = 305.197
+known = true
+[[knob]]
+key = "spring"
+page = "Chassis"
+per = "corner"
+label = "Spring rate"
+unit = "N/mm"
+step = 1.0
+min_front = 18.0
+max_front = 35.0
+min_rear = 30.0
+max_rear = 70.0
+known = true
+[[knob]]
+key = "packer"
+page = "Chassis"
+per = "corner"
+label = "Packer"
+unit = "mm"
+min = 0.0
+max = 19.05
+step = 0.396875
+known = true
+[[knob]]
+key = "bump"
+page = "Chassis"
+per = "corner"
+label = "Bump stiffness"
+unit = "clicks"
+min = 0
+max = 12
+step = 1
+known = true
+[[knob]]
+key = "rebound"
+page = "Chassis"
+per = "corner"
+label = "Rebound stiffness"
+unit = "clicks"
+min = 0
+max = 12
+step = 1
+known = true
+[[knob]]
+key = "camber"
+page = "Chassis"
+per = "corner"
+label = "Camber"
+unit = "deg"
+min = -2.5
+max = 4.0
+step = 0.1
+known = false
+seen = [-2.5, 4.0]
+[[knob]]
+key = "fuel"
+page = "Chassis"
+group = "Rear"
+label = "Fuel level"
+unit = "L"
+min = 4.5
+max = 179.5
+step = 0.1
+known = true
+[[knob]]
+key = "rarb_dia"
+page = "Chassis"
+group = "Rear"
+label = "ARB diameter"
+options = ["Disconnected", "0.625\"", "0.6875\""]   # IRPLAN-4 B2 (rear_arb_diameter.png): the whole list
+values = [0.0, 0.625, 0.6875]
+known = true
+[[knob]]
+key = "rarb_arm"
+page = "Chassis"
+group = "Rear"
+label = "ARB arms"
+options = ["soft", "2", "3", "4", "5", "6", "firm"]
+known = true
+[[knob]]
+key = "toe_rear"
+page = "Chassis"
+group = "Rear"
+label = "Toe-in"
+unit = "mm"
+min = -6.0
+max = 17.0
+step = 1.0
+known = true
+seen = [-6, 1, 3, 17]
+
+[[knob]]
+key = "final_drive"
+page = "Drivetrain"
+group = "Transmission"
+label = "Final drive"
+options = ["3.20", "3.44", "3.56", "3.78", "4.00", "4.11", "4.22", "4.50", "4.63", "4.87", "5.14"]  # IRPLAN-4 B2 lists
+values = [3.20, 3.44, 3.56, 3.78, 4.00, 4.11, 4.22, 4.50, 4.63, 4.87, 5.14]
+known = true
+[[knob]]
+key = "gear1"
+page = "Drivetrain"
+group = "Transmission"
+label = "First Gear"
+options = ["2.23", "2.42", "2.58", "2.86"]
+values = [2.23, 2.42, 2.58, 2.86]
+known = true
+[[knob]]
+key = "gear2"
+page = "Drivetrain"
+group = "Transmission"
+label = "Second Gear"
+options = ["1.40", "1.47", "1.53", "1.61", "1.72"]
+values = [1.40, 1.47, 1.53, 1.61, 1.72]
+known = true
+[[knob]]
+key = "gear3"
+page = "Drivetrain"
+group = "Transmission"
+label = "Third Gear"
+options = ["1.04", "1.09", "1.14", "1.21", "1.32"]
+values = [1.04, 1.09, 1.14, 1.21, 1.32]
+known = true
+[[knob]]
+key = "gear4"
+page = "Drivetrain"
+group = "Transmission"
+label = "Fourth Gear"
+options = ["0.826", "0.846", "0.958", "1.00", "1.04", "1.09"]
+values = [0.826, 0.846, 0.958, 1.00, 1.04, 1.09]
+known = true
+[[knob]]
+key = "gear5"
+page = "Drivetrain"
+group = "Transmission"
+label = "Fifth Gear"
+options = ["0.620", "0.642", "0.655", "0.704", "0.740", "0.846", "0.880", "0.916", "0.958"]
+values = [0.620, 0.642, 0.655, 0.704, 0.740, 0.846, 0.880, 0.916, 0.958]
+known = true
+[[knob]]
+key = "diff_plates"
+page = "Drivetrain"
+group = "Differential"
+label = "Clutch plates"
+min = 2
+max = 6
+step = 1
+known = false
+seen = [4, 6]
+[[knob]]
+key = "diff_preload"
+page = "Drivetrain"
+group = "Differential"
+label = "Preload"
+unit = "Nm"
+min = 0
+max = 150
+step = 1
+known = false
+seen = [41]
+[[knob]]
+key = "diff_drive"
+page = "Drivetrain"
+group = "Differential"
+label = "Drive ramp angle"
+unit = "deg"
+min = 35
+max = 85
+step = 5
+known = false
+seen = [35, 50, 55, 65, 75]
+[[knob]]
+key = "diff_coast"
+page = "Drivetrain"
+group = "Differential"
+label = "Coast ramp angle"
+unit = "deg"
+min = 35
+max = 85
+step = 5
+known = false
+seen = [60, 80, 85]
+
+# ---- STEER16 (PO 2026-10-25): julia's own changes on top of a recorded session ----------------------------------------
+# Knobs julia sets differently from the .ibt session a setup is built from -- the launcher's base for that setup (via
+# tools/garage_sessions.jl) and the sim's car (drive_native_mtk.jl session_params) both apply them. WW103 runs Classic's
+# 16:1 steering: reference's Lotus offers 16:1 (IRPLAN-4 B2), the 261005 WW103 session was driven at 10:1.
+[julia_setup.ww103]
+steering_ratio = 16.0
+
+# ---- CLASSICSETUP-1: what a typical Classic Lotus 49 setup is (medians over the 6,025 .kj1 on the PO's PC, 2026-10-17) -------
+# The importer (demo/native/classic_setup.py) carries a Classic anti-roll bar over by its range position: Classic rate / this median
+# -> the reference bar whose garage rate stands the same way against the default car's.
+[classic]
+arb_median = [160.0, 150.0]       # lb/in, front / rear (min 60/40, max 280/292)
+wheel_rate_median = [75.0, 95.0]  # lb/in (front 50..125, rear 70..160) -- for reference
