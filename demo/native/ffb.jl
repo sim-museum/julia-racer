@@ -66,7 +66,27 @@ function open_ffb(path = nothing; match = "Thrustmaster")
     id = reinterpret(Int16, _getu16(buf, 2))
     dev = FFBDevice(fd, id, buf, true, path)
     _play(dev, true)
+    get(ENV, "JM_FFB_AUTOCENTER_OFF", "1") == "0" || _autocenter_write(fd, 0)
     dev
+end
+
+const AC_FD = Ref{Cint}(-1)
+function _autocenter_write(fd::Cint, level::Integer)
+    ev = zeros(UInt8, 24)
+    _put16!(ev, 16, UInt16(EV_FF)); _put16!(ev, 18, UInt16(0x61))
+    @inbounds for k in 0:3; ev[20+1+k] = UInt8((UInt32(level) >> (8k)) & 0xff); end
+    ccall(:write, Cssize_t, (Cint, Ptr{UInt8}, Csize_t), fd, ev, 24) == 24
+end
+"Turn the wheel's own centring spring off and keep its event node open. Returns the node's path, or nothing."
+function autocenter_off!(match = "Thrustmaster")
+    get(ENV, "JM_FFB_AUTOCENTER_OFF", "1") == "0" && return nothing
+    path = find_event(match); path === nothing && return nothing
+    if AC_FD[] < 0
+        fd = ccall(:open, Cint, (Cstring, Cint), path, Cint(1))
+        fd < 0 && return nothing
+        AC_FD[] = fd
+    end
+    _autocenter_write(AC_FD[], 0) ? path : nothing
 end
 
 function _play(dev::FFBDevice, on::Bool)

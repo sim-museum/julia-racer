@@ -69,7 +69,23 @@ function build_line(pts, groundz; spacing = 3.0, halfwidth = 3.0)
         κ0[i] = abs(wrapπ(θ[j]-θ[i])) / ds
     end
 
-    rx = copy(x); rz = copy(z)
+    bx = copy(x); bz = copy(z)
+    if get(ENV, "JM_AI_JOGSMOOTH", "1") != "0"
+        W = max(1, round(Int, 24/spacing)); K = max(1, round(Int, 24/spacing)); nj = 0; jmax = 0.0
+        P_(k) = (x[mod(k-1, n)+1], z[mod(k-1, n)+1])
+        for i in 1:n
+
+            a1 = P_(i - 2W); a2 = P_(i - W); b1 = P_(i + W); b2 = P_(i + 2W)
+            abs(wrapπ(atan(b2[2] - b1[2], b2[1] - b1[1]) - atan(a2[2] - a1[2], a2[1] - a1[1]))) < 0.12 || continue
+            ax = 0.0; az = 0.0
+            for d in -K:K; ax += x[mod(i-1+d, n)+1]; az += z[mod(i-1+d, n)+1]; end
+            bx[i] = ax/(2K+1); bz[i] = az/(2K+1)
+            sh = hypot(bx[i] - x[i], bz[i] - z[i]); sh > 0.5 && (nj += 1); jmax = max(jmax, sh)
+        end
+        nj > 0 && println("  [aijog] racing-line band centred on the smoothed centreline at ", nj, " nodes > 0.5 m (max ",
+                          round(jmax, digits = 2), " m; JM_AI_JOGSMOOTH=0 = before)")
+    end
+    rx = copy(bx); rz = copy(bz)
     nx = Float64[-sin(θ[i]) for i in 1:n]; nz = Float64[cos(θ[i]) for i in 1:n]
 
     hwκ = [halfwidth * (1.0 - 0.5*clamp((κ0[i]-0.018)/0.045, 0.0, 1.0)) for i in 1:n]
@@ -88,7 +104,7 @@ function build_line(pts, groundz; spacing = 3.0, halfwidth = 3.0)
             p = mod(i-2, n)+1; q = i % n + 1
             mx = 0.5*(rx[p]+rx[q]); mz = 0.5*(rz[p]+rz[q])
             rx[i] += 0.25*(mx-rx[i]); rz[i] += 0.25*(mz-rz[i])
-            offraw = (rx[i]-x[i])*nx[i] + (rz[i]-z[i])*nz[i]
+            offraw = (rx[i]-bx[i])*nx[i] + (rz[i]-bz[i])*nz[i]
 
             off = if SOFT_BAND[]
                 a = SOFT_KNEE[] * hw[i]
@@ -102,7 +118,7 @@ function build_line(pts, groundz; spacing = 3.0, halfwidth = 3.0)
             end
 
             pinned[i] = (offraw != off)
-            rx[i] = x[i] + off*nx[i]; rz[i] = z[i] + off*nz[i]
+            rx[i] = bx[i] + off*nx[i]; rz[i] = bz[i] + off*nz[i]
         end
     end
     rlg = Float64[(rx[i]-x[i])*nx[i] + (rz[i]-z[i])*nz[i] for i in 1:n]
@@ -363,6 +379,11 @@ const AVOID_CORNER = get(ENV, "JM_AI_AVOID_CORNER", "1") != "0"
 const PASS_RADIUS = parse(Float64, get(ENV, "JM_AI_PASS_RADIUS", "75.0"))
 const AVOIDSTAT = Ref(0)
 
+const AI_TRAIL = get(ENV, "JM_AI_TRAIL", "1") != "0"
+const PP_WHEELBASE = 2.41; const PP_MAXSTEER = 0.30
+
+const PP_LA_T = parse(Float64, get(ENV, "JM_RAI_LA_T", "0.55"))
+const PP_YAWK = parse(Float64, get(ENV, "JM_RAI_YAWK", "0.06"))
 const SPIN_LO  = parse(Float64, get(ENV, "JM_AI_SPIN_LO", "1.0"))
 const SPIN_HI  = parse(Float64, get(ENV, "JM_AI_SPIN_HI", "3.0"))
 const CAR_LEN  = 4.2
@@ -845,7 +866,8 @@ car — the JM physics model + the controller do the motion.  Each `AICar` must 
 its `s`, `lane`, `v` updated from its physics car (project it onto the line).  Returns the
 per-car target speed `vt`."""
 function plan!(cars::Vector{AICar}, line::AILine; player = nothing, scale = 1.0, rel = Inf,
-               amax = 11.0, vmax = 74.0, vmin = 12.0, dt = 1/60)
+               amax = 11.0, vmax = 74.0, vmin = 12.0, dt = 1/60, hold::Bool = true, lanes::Bool = true)
+
     total = line.total
     blocker(s_i, skip) = begin
         bg = Inf; res = nothing
@@ -876,14 +898,15 @@ function plan!(cars::Vector{AICar}, line::AILine; player = nothing, scale = 1.0,
         overlap  = gap < CAR_LEN*0.7
         patience = 1.2 + 1.8*((0.37*i) % 1.0)
         edge   = bv + 1.0 < vt
-        if car.tlane == 0.0
+        if !lanes
+        elseif car.tlane == 0.0
             if gap < tail && dlane < 2.4
                 car.follow += dt
 
-                if car.follow > patience && edge && (straight || overlap)
+                if (car.follow > patience && edge && (straight || overlap)) || (!hold && bv < 5.0 && gap < tail)
                     car.tlane = blane >= 0.0 ? -RAIL : RAIL
                     car.follow = 0.0
-                elseif gap < car.v*0.6 + CAR_LEN
+                elseif hold && gap < car.v*0.6 + CAR_LEN
                     vt = min(vt, bv)
                 end
             else
@@ -907,7 +930,7 @@ function plan!(cars::Vector{AICar}, line::AILine; player = nothing, scale = 1.0,
                     car.tlane = 0.0
                 end
                 vt = min(vt, bv)
-            elseif gap < car.v*0.6 + CAR_LEN && dlane < 1.6
+            elseif hold && gap < car.v*0.6 + CAR_LEN && dlane < 1.6
                 vt = min(vt, bv)
             end
         end
@@ -921,13 +944,17 @@ end
 `dev`iation, e.g. ±RAIL to pull out alongside) at speed `tv` (short-look-ahead pursuit +
 cross-track + yaw-damp, corner throttle-cut).  `cs`/`clane` = the car's current arc-length/
 lateral (from projection), `cθ`/`cv`/`r` its heading/speed/yaw-rate.  Returns (thr, brk, steer)."""
-function controller(line::AILine, cs, clane, dev, tv, cx, cz, cθ, cv, r; power = 1.0)
+function controller(line::AILine, cs, clane, dev, tv, cx, cz, cθ, cv, r; power = 1.0, pp = false, amax = 8.0, lo = -Inf, hi = Inf, holdwall = false)
     la = clamp(6.0 + cv*0.35, 6.0, 20.0)
 
     κloc = max(curv_at(line, cs), curv_at(line, cs + 0.5*la), 1e-4)
-    la = clamp(min(la, 0.32/κloc), 4.0, 20.0)
+    pp && PP_LA_T > 0 && (la = max(la, PP_LA_T*cv))
+    la = clamp(min(la, 0.32/κloc), 4.0, pp && PP_LA_T > 0 ? 45.0 : 20.0)
     tlane = clamp(racelane(line, cs + la) + dev, -LANE_MAX, LANE_MAX)
+    tlane = clamp(tlane, lo, hi)
     here  = clamp(racelane(line, cs)      + dev, -LANE_MAX, LANE_MAX)
+
+    holdwall && (here = clamp(here, lo, hi))
     lp = pose_at(line, cs + la, tlane)
     herr = wrapπ(atan(lp[3]-cz, lp[1]-cx) - cθ)
 
@@ -935,11 +962,18 @@ function controller(line::AILine, cs, clane, dev, tv, cx, cz, cθ, cv, r; power 
     hgain = 3.0 * (1.0 - 0.45*slide)
     yawd  = 0.22 + 0.55*slide
     steer = clamp(hgain*herr - 0.24*(clane - here) - yawd*r, -1.0, 1.0)
+    if pp
+
+        d = max(hypot(lp[1] - cx, lp[3] - cz), 1.0)
+        κd = clamp(2.0*sin(herr)/d - 0.04*(clane - here)/max(d, 4.0), -amax/max(cv, 5.0)^2, amax/max(cv, 5.0)^2)
+        δ = atan(PP_WHEELBASE*κd) + PP_YAWK*(cv*κd - r)
+        steer = clamp(δ/PP_MAXSTEER, -1.0, 1.0)
+    end
 
     thr = (cv < tv ? clamp((tv-cv)*0.25, 0, 1) * clamp(1.4 - 2.2*abs(steer), cv < 3.0 ? 0.35 : 0.0, 1.0) : 0.0) * power * (1.0 - 0.75*slide)
     brk = cv > tv + 1.0 ? clamp((cv-tv)*0.25, 0, 1) : 0.0
 
-    (brk < 0.05 && abs(steer) > 0.2 && cv > tv*0.92) && (brk = clamp(0.10*abs(steer), 0.0, 0.18))
+    (AI_TRAIL && brk < 0.05 && abs(steer) > 0.2 && cv > tv*0.92) && (brk = clamp(0.10*abs(steer), 0.0, 0.18))
     (thr, brk, steer)
 end
 

@@ -653,13 +653,17 @@ function compose_hud(W,H,kmh,gear,rpm,revlim,thr,brk,clu=0.0,tc=nothing; lastlap
         end
     end
     if countdown >= 0.0
-        n = ceil(Int, countdown)
-        if n > 0
-            band > 0 ? hdigit!(v, W÷2 - 30, 12, 60, 110, 15, clamp(n, 0, 9), amber) :
-                       hdigit!(v, W÷2 - 45, H÷2 - 90, 90, 170, 22, clamp(n, 0, 9), amber)
-        else
 
-            for k in 0:2; hquad!(v, W÷2 - 90 + 66k, (band > 0 ? 40 : H÷2 - 20), 48, 40, green); end
+        n = ceil(Int, countdown)
+        lit = n > 0 ? clamp(6 - n, 1, 4) : 4
+        bw, bh = 390, 110
+        bx, by = W÷2 - bw÷2, (band > 0 ? 10 : 24)
+        hquad!(v, bx-6, by-6, bw+12, bh+12, dim)
+        hquad!(v, bx, by, bw, bh, (0.07, 0.07, 0.08))
+        for k in 0:3
+            lx = bx + 30 + 90k; ly = by + 20
+            hquad!(v, lx-4, ly-4, 78, 78, (0.18, 0.18, 0.2))
+            hquad!(v, lx, ly, 70, 70, n <= 0 ? green : k < lit ? red : (0.12, 0.05, 0.05))
         end
     end
     if band == 0
@@ -1138,6 +1142,20 @@ function extract_classic_car(path3do; exclude=("ltraymap","lshad"), only=(), gre
             k = ckey(t)
             (k in seen) ? false : (push!(seen, k); true)
         end
+    end
+
+    lift = track ? something(tryparse(Float32, get(ENV, "JM_PAINT_LIFT", "0.02")), 0.02f0) : 0f0
+    if lift != 0f0
+        nlift = 0
+        kept = map(kept) do t
+            (t.tex == "" || (t.flat && t.tex == livery)) || return t
+            e1 = t.p[2] .- t.p[1]; e2 = t.p[3] .- t.p[1]
+            n = (e1[2]*e2[3] - e1[3]*e2[2], e1[3]*e2[1] - e1[1]*e2[3], e1[1]*e2[2] - e1[2]*e2[1])
+            abs(n[3]) > 0.95f0*sqrt(n[1]^2 + n[2]^2 + n[3]^2) || return t
+            nlift += 1
+            CLASSIC3DO.Tri(map(q -> (q[1], q[2], q[3] + lift), t.p), t.n, t.uv, t.tex, t.col, t.flat, t.ptype)
+        end
+        nlift > 0 && println("  [paintlift] ", nlift, " untextured flat track triangles lifted ", lift, " m over the road (JM_PAINT_LIFT=0 = before)")
     end
 
     nsum = Dict{NTuple{3,Int32},NTuple{3,Float32}}()

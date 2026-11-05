@@ -17,19 +17,26 @@ const AI_GONE = Set{Int}()
 const YELLOW_T = Ref((-Inf, -Inf))
 const PLAYER_YELLOWED = Ref(false)
 
+const INC_YELLOW = parse(Float64, get(ENV, "JM_INC_YELLOW", "6"))
+const INCIDENTS = Tuple{Float64,Float64,String}[]
+const INC_LAST = Ref(-Inf)
+"Report an incident at game (x, z) (picked up by the next yellow_step!)."
+incident!(x, z, what::String) = (INC_YELLOW > 0 && push!(INCIDENTS, (Float64(x), Float64(z), what)); nothing)
+
 function ai_wheeloff_reset!()
     empty!(AI_WHEELS_OFF); empty!(AI_LOOSE_WHEELS); empty!(AI_LOOSE_OWNER); empty!(AI_WRECK)
     empty!(AI_GONE_AT); empty!(AI_GONE); empty!(CLASSICAI.GONE); empty!(CLASSICAI.YZ); empty!(CLASSICAI.SOFTEDGE); YELLOW_T[] = (-Inf, -Inf); PLAYER_YELLOWED[] = false
+    empty!(INCIDENTS); INC_LAST[] = -Inf
     nothing
 end
 
 yellow_on(t) = YELLOW_T[][1] <= t < YELLOW_T[][2]
 
-function yellow_start!(t::Float64, x::Float64, z::Float64, who::String, CLASSICAI_T)
+function yellow_start!(t::Float64, x::Float64, z::Float64, who::String, CLASSICAI_T; secs = WRECK_CLEAR + YELLOW_AFTER, field::Bool = true)
     (t0, t1) = YELLOW_T[]
-    YELLOW_T[] = (t1 > t ? t0 : t, max(t1, t + WRECK_CLEAR + YELLOW_AFTER))
+    YELLOW_T[] = (t1 > t ? t0 : t, max(t1, t + secs))
     gs = NaN
-    CLASSICAI_T === nothing || ((gs, _, _) = CLASSICAI.tlocate(CLASSICAI_T, x, z, 0); push!(CLASSICAI.YZ, gs))
+    CLASSICAI_T === nothing || ((gs, _, _) = CLASSICAI.tlocate(CLASSICAI_T, x, z, 0); field && push!(CLASSICAI.YZ, gs))
     println("  [yellow] t=", round(t, digits = 2), " ", who, isnan(gs) ? "" : string(" at s ", round(gs, digits = 0)),
             ": yellow flag until t=", round(YELLOW_T[][2], digits = 1)); flush(stdout)
     nothing
@@ -48,6 +55,16 @@ function yellow_step!(t::Float64, px::Float64, pz::Float64, CLASSICAI_T)
         PLAYER_YELLOWED[] = true
         yellow_start!(t, px, pz, "your car wrecked", CLASSICAI_T)
     end
+    for (x, z, what) in INCIDENTS
+        if yellow_on(t) && t - INC_LAST[] < 2.0
+            YELLOW_T[] = (YELLOW_T[][1], max(YELLOW_T[][2], t + INC_YELLOW))
+        else
+
+            yellow_start!(t, x, z, what, CLASSICAI_T; secs = INC_YELLOW, field = false)
+        end
+        INC_LAST[] = t
+    end
+    empty!(INCIDENTS)
     for (k, tg) in AI_GONE_AT
         (t >= tg && !(k in AI_GONE)) || continue
         push!(AI_GONE, k); push!(CLASSICAI.GONE, k); delete!(AI_WRECK, k)
@@ -203,16 +220,26 @@ end
 
 """S2: a hard wall hit on AI car k's rigid body (pose `p`, game frame) tears off the wheels leading into that wall, as
 E95 does for the player's: the body's wall push > 30 kN at > 3 m/s, each still-attached hub > 0.35 m ahead of the CG
-against the wall's normal. The body loses that corner. Returns the number torn off."""
+against the wall's normal -- and (IR261031-1 S4) only at reference's closing speeds, only the leading wheel(s). The body loses that corner. Returns the number torn off."""
 function ai_wall_tear!(k::Int, b::WreckBody.Body, p)
     WB = WreckBody; V3 = WB.V3
     (AI_WHEELOFF_ON && b.wall_peak > 3.0e4 && WB.LinearAlgebra.norm(b.v) > 3.0 && k <= length(AICARMODELS::Vector{Render.CLASSICCarModel})) || return 0
     cm = AICARMODELS[k]::Render.CLASSICCarModel; n = b.wall_n; g = b.g; c = 0
+
+    lead_of(w) = (h = ai_hub(p, cm, w[1], w[2], w[4]); -((h[1] - b.p[1])*n[1] + (h[3] - b.p[3])*n[3]))
+    leads = [ai_wheel_off(k, w[5]) ? -Inf : lead_of(w) for w in cm.wheelspec]
+    lmax = maximum(leads); nlead = count(l -> l > lmax - 0.3, leads)
+    vclose = abs(b.v[1]*n[1] + b.v[3]*n[3])
+    vneed = nlead == 1 ? WALLTEAR[1] : WALLTEAR[2]
+    WALLTEAR_DIAG && lmax > 0.35 && println("  [walltear] AI ", k, vclose > vneed ? " TEAR" : " kept", ": closing ", round(vclose*3.6, digits = 0),
+                                           " km/h, ", nlead == 1 ? "one wheel leading" : "square on")
+    vclose > vneed || return 0
     for w in cm.wheelspec
         ai_wheel_off(k, w[5]) && continue
         h = ai_hub(p, cm, w[1], w[2], w[4])
         lead = -((h[1] - b.p[1])*n[1] + (h[3] - b.p[3])*n[3])
         lead > 0.35 || continue
+        (WALLTEAR[1] > 0 && lead < lmax - 0.3) && continue
         push!(get!(Vector{String}, AI_WHEELS_OFF, k), String(w[5]))
         q = V3(h...); j = 1; dj = Inf
         for cc in 1:4
@@ -352,18 +379,12 @@ function replay_wheels_set!(fr::Float64)
     nothing
 end
 
-const YELLOW_V = Float32[]
-"""TD261030-1 (7): the yellow flag, waving, at the left of the 3D view (where the chequered flag shows) while it is out."""
+"""TD261030-1 (7): the yellow flag while it is out -- TD261103-2: middle left, where the white and chequered flags show
+(they take the place while they show)."""
 function yellow_flag_draw!(t::Float64, W, H)
+    band_flag_shown(t) && return nothing
+    meatball_on(t) && return flag_draw!(:meatball, t, W, H)
     yellow_on(t) || return nothing
-    v = empty!(YELLOW_V)
-    fw = round(0.09W); fh = round(0.62fw); fx = round(0.05W); fy = band_px() + round(0.30view_h() - fh/2)
-    Render.hquad!(v, fx - 10, fy - 6, 6, fh*2.2, (0.55, 0.45, 0.30))
-    n = 8; sw = fw/n
-    for i in 0:n-1
-        dy = 0.06fh*sin(2π*(1.6t - i/n))*(i/n); sh = 0.85 + 0.15*cos(2π*(1.6t - i/n))
-        Render.hquad!(v, fx + i*sw, fy + dy, sw + 1, fh, (0.98sh, 0.84sh, 0.08))
-    end
-    Render.hud_draw(hudprog, hudvao, hudvbo, v, W, H)
+    flag_draw!(:yellow, t, W, H)
     nothing
 end

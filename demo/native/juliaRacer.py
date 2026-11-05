@@ -29,7 +29,7 @@ from PyQt6.QtGui import QColor, QFont, QKeySequence, QPalette
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QGroupBox,
     QButtonGroup, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QProgressBar, QPushButton, QRadioButton,
-    QPlainTextEdit, QSizePolicy, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
+    QDoubleSpinBox, QPlainTextEdit, QSizePolicy, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -143,7 +143,14 @@ def guide_dialog(parent):
     ok = QPushButton("Close"); ok.clicked.connect(d.accept); v.addWidget(ok, 0, Qt.AlignmentFlag.AlignRight)
     return d
 
-WETNESS_CHOICES = (("Dry", "1"), ("Wet (reference \"very wet\")", "6"), ("Very wet (reference \"extremely wet\")", "7"))
+WETNESS_CHOICES = (("Dry", "1"), ("Very light moisture", "3"), ("Light moisture", "4"), ("Moderate moisture", "6"),
+                   ("Extremely wet (rain)", "7"))
+
+AI_STYLES = (("Line-following", "line", "AI cars ride the racing line to within a hand's width, queue single file behind each "
+                                        "other and pass only a clearly slower car, usually on a straight."),
+             ("Racecraft (in development)", "racecraft", "AI cars watch the cars all around them, run side by side, leave you "
+                                        "room, defend, and pass on whichever side is free. In development: today it runs the "
+                                        "physics AI; the racecraft driver is being built (AISTYLE-1)."))
 
 _CLASSIC_TIPS = {}
 
@@ -554,7 +561,8 @@ STEPS = [
     ("clutch_btn", "Step 7b — Press the button you want to use as CLUTCH."),
     ("up", "Step 8 — Press the SHIFT-UP paddle/button."),
     ("dn", "Step 9 — Press the SHIFT-DOWN paddle/button."),
-    ("fs", "Step 10 — Press the button that will switch FULL SCREEN on and off during a race — or Skip."),
+    ("fs", "Step 10 — Press the button that will show/hide the control BAND during a race (the 3D view full screen, "
+           "like the F key) — or Skip."),
     ("done", "Done — review the live preview below, then Save."),
 ]
 STEP = {k: i for i, (k, _) in enumerate(STEPS)}
@@ -931,6 +939,14 @@ class CalibrateTab(QWidget):
                 self.capl.setText(f"Turning: axis {far + 1} at {min(1.0, tr[far] / need):.0%} -- keep turning LEFT")
         cand = [i for i in cand if tr[i] >= need]
         if not cand:
+
+            if key != "steer":
+                weak = [(abs(v - sw.centre[i]), i) for i, v in enumerate(ax) if i != self.work.steer.axis - 1 and sw.kind(i) is None]
+                d, i = max(weak, default=(0.0, -1))
+                if d >= 0.01:
+                    self.capl.setText(f"Axis {i + 1} moves, but only {d / 2:.0%} of its range -- too little to use. If that is "
+                                      f"the {key} pedal fully pressed, its signal is weak: check the pedal cable at the wheel "
+                                      f"base (unplug, replug), then Restart.")
             return
         i = max(cand, key=lambda k: tr[k])
         self._used.add((i, side(i)))
@@ -973,7 +989,7 @@ class CalibrateTab(QWidget):
                     self._goto("fs")
                 elif key == "fs":
                     self.work.fullscreen_btn = i + 1
-                    self.capl.setText(f"Full-screen button = {i + 1}")
+                    self.capl.setText(f"Band on/off button = {i + 1}")
                     self._goto("done")
                 return
 
@@ -991,7 +1007,7 @@ class CalibrateTab(QWidget):
         m = self.work
         c = (f"steer ax{m.steer.axis}  thr ax{m.throttle.axis}  brk ax{m.brake.axis}  "
              f"clutch {'ax'+str(m.clutch.axis) if m.clutch.axis else ('btn'+str(m.clutch_btn) if m.clutch_btn else 'none')}  "
-             f"up b{m.up_btn} dn b{m.dn_btn}" + (f"  full screen b{m.fullscreen_btn}" if m.fullscreen_btn else ""))
+             f"up b{m.up_btn} dn b{m.dn_btn}" + (f"  band b{m.fullscreen_btn}" if m.fullscreen_btn else ""))
         return c
 
     def save(self):
@@ -1078,15 +1094,42 @@ class DriveTab(QWidget):
             self.wet.addItem(label, lvl)
         i = self.wet.findData(str(st.value("session/wetness", "1")))
         self.wet.setCurrentIndex(i if i >= 0 else 0)
-        self.wet.setToolTip("Dry, or wet as in reference's rain at Monza (measured from your 25 October wet laps): the tyres\n"
-                            "grip less, and less the faster you go -- about 85 % of dry at 70 km/h, half at 200 km/h.\n"
-                            "The AI drives slower to match. The look stays dry for now. Not on the skidpad.")
+        self.wet.setToolTip("Road moisture, as reference's menu (measured from your 31 October Monza sessions). The tyres grip\n"
+                            "less, and less the faster you go -- tyre grip against dry at 70 / 215 km/h:\n"
+                            "  Very light 93 % / 86 %   Light 91 % / 74 %   Moderate 89 % / 62 %   Extremely wet 88 % / 27 %\n"
+                            "Braking and traction lose a further 14-20 %. Overcast sky, road sheen and spray grow with the\n"
+                            "level; the AI drives slower to match. Not on the skidpad (reference allows no moisture there).")
         self.wet.currentIndexChanged.connect(lambda _: st.setValue("session/wetness", self.wet.currentData()))
         form.addWidget(self.wet, 7, 1, 1, 2)
         self.track.currentIndexChanged.connect(lambda i: self.wet.setEnabled(i != 1))
         self.wet.setEnabled(self.track.currentIndex() != 1)
+
+        form.addWidget(QLabel("AI driving style:"), 8, 0)
+        self.aistyle = QComboBox()
+        for label, key, tip in AI_STYLES:
+            self.aistyle.addItem(label, key)
+            self.aistyle.setItemData(self.aistyle.count() - 1, tip, Qt.ItemDataRole.ToolTipRole)
+        i = self.aistyle.findData(str(st.value("session/ai_style", "line")))
+        self.aistyle.setCurrentIndex(i if i >= 0 else 0)
+        self.aistyle.setToolTip("\n".join(f"{l}: {t}" for l, _, t in AI_STYLES))
+        form.addWidget(self.aistyle, 8, 1, 1, 2)
+
+        self.aiaggr_l = QLabel("AI aggression:")
+        form.addWidget(self.aiaggr_l, 9, 0)
+        self.aiaggr = QDoubleSpinBox(); self.aiaggr.setRange(0.0, 1.0); self.aiaggr.setSingleStep(0.05); self.aiaggr.setDecimals(2)
+        self.aiaggr.setValue(float(st.value("session/ai_aggression", 0.5)))
+        self.aiaggr.setToolTip("Racecraft only: how hard the AI drivers race -- how close they run alongside, how soon they\n"
+                               "commit to a pass, how long they hold it. 0.3-0.4 for clean racing; 0.5 is the default.")
+        self.aiaggr.valueChanged.connect(lambda v: st.setValue("session/ai_aggression", v))
+        form.addWidget(self.aiaggr, 9, 1)
+        def _aistyle_changed(_):
+            st.setValue("session/ai_style", self.aistyle.currentData())
+            rc = self.aistyle.currentData() == "racecraft"
+            self.aiaggr.setVisible(rc); self.aiaggr_l.setVisible(rc)
+        self.aistyle.currentIndexChanged.connect(_aistyle_changed)
+        _aistyle_changed(0)
         form.setColumnStretch(1, 1)
-        form.setRowStretch(8, 1)
+        form.setRowStretch(10, 1)
 
         car = QGroupBox("Car"); cform = QGridLayout(car); cols.addWidget(car, 2)
 
@@ -1618,6 +1661,8 @@ class DriveTab(QWidget):
         qenv.insert("JM_PLAYER_CAR", self.playercar.currentData() or "lotus")
         wet = self.wet.currentData() or "1"
         wet != "1" and qenv.insert("JM_WETNESS", wet)
+        qenv.insert("JM_AI_STYLE", self.aistyle.currentData() or "line")
+        self.aistyle.currentData() == "racecraft" and qenv.insert("JM_RAI_AGGRESSION", f"{self.aiaggr.value():.2f}")
         qenv.insert("ZAND_SHIFT", "auto" if self.gearbox.currentIndex() == 0 else "manual")
         qenv.insert("JM_CARSETUP", self.setup_choice()[0])
         gf = self.garage_file() if getattr(self, "garage_file", None) else None

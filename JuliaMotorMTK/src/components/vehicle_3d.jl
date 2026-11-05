@@ -61,7 +61,7 @@ function DrivenVehicle3D(; name,
     RR = brush ? BrushTyre(; name=:RR, br...,  camber=cmb, nsh=nshr, ns=nsrv) : Tyre(; name=:RR, TYRE_SKIDPAD_REAR...)
 
     gv, kfv, krv = g, karb_f, karb_r
-    ps = @parameters m=m Izz=Izz Ixx=Ixx Iyy=Iyy a=a b=b tf=tf tr=tr h=h mf=mf mr=mr L=L M_s=M_s g=g Rw_f=Rw_f Rw_r=Rw_r Iw=Iw η=η final=final bias=bias Tbrake_max=Tbrake_max CdA=CdA ρair=ρair throttle=throttle0 brake=brake0 δ=steer0 gear=gear0 clutch=0.0 hrc_f=0.0 hrc_r=0.0 ClAf=claf ClAf_rh=AERO_CLAF_RH ClAr=clar antistall=0.0 as_r0=1957.0 as_k=495.0 as_w=490.0 Ie=(ENGINE_LUMPED ? 0.18 : IE_ENGINE) Igb=(ENGINE_LUMPED ? 0.0 : DRIVELINE_INPUT ? 0.18 - IE_ENGINE : IE_DRIVELINE) c_c=60.0 T_cap=500.0 k_idle=0.5 idle_rpm=2000.0 zrFL=0.0 zrFR=0.0 zrRL=0.0 zrRR=0.0 vrFL=0.0 vrFR=0.0 vrRL=0.0 vrRR=0.0 Fx_ext=0.0 Fy_ext=0.0 Mz_ext=0.0 CdA_scale=1.0 c_abl=(cmb && USE_TYRE3 ? TYRE3.cabl : C_ABL) toe_f=toe_f toe_r=toe_r karb_f=karb_f karb_r=karb_r η_d=ETA_DRIVE
+    ps = @parameters m=m Izz=Izz Ixx=Ixx Iyy=Iyy a=a b=b tf=tf tr=tr h=h mf=mf mr=mr L=L M_s=M_s g=g Rw_f=Rw_f Rw_r=Rw_r Iw=Iw η=η final=final bias=bias Tbrake_max=Tbrake_max CdA=CdA ρair=ρair throttle=throttle0 brake=brake0 δ=steer0 gear=gear0 clutch=0.0 hrc_f=0.0 hrc_r=0.0 ClAf=claf ClAf_rh=AERO_CLAF_RH ClAr=clar antistall=0.0 as_r0=1957.0 as_k=495.0 as_w=490.0 Ie=(ENGINE_LUMPED ? 0.18 : IE_ENGINE) Igb=(ENGINE_LUMPED ? 0.0 : DRIVELINE_INPUT ? 0.18 - IE_ENGINE : IE_DRIVELINE) c_c=60.0 T_cap=500.0 k_idle=0.5 idle_rpm=2000.0 zrFL=0.0 zrFR=0.0 zrRL=0.0 zrRR=0.0 vrFL=0.0 vrFR=0.0 vrRL=0.0 vrRR=0.0 Fx_ext=0.0 Fy_ext=0.0 Mz_ext=0.0 CdA_scale=1.0 sgx=0.0 sgy=0.0 c_abl=(cmb && USE_TYRE3 ? TYRE3.cabl : C_ABL) toe_f=toe_f toe_r=toe_r karb_f=karb_f karb_r=karb_r η_d=ETA_DRIVE
     brk = BrakeSystem(; name = :brk, bias_p = brake_bias_p)
     tank = FuelTank(; name = :tank, x = tank_x)
     if cmb
@@ -195,13 +195,15 @@ function DrivenVehicle3D(; name,
 
         ax ~ (ΣFx - drag - rr - abl + Fx_ext)/mc,
         ay ~ (ΣFy + Fy_ext)/mc,
-        mc*(D(u) - v*r) ~ ΣFx - drag - rr - abl + Fx_ext,
-        mc*(D(v) + u*r) ~ ΣFy + Fy_ext,
+
+        mc*(D(u) - v*r) ~ ΣFx - drag - rr - abl + Fx_ext - mc*g*sgx,
+        mc*(D(v) + u*r) ~ ΣFy + Fy_ext - mc*g*sgy,
         Izz*D(r) ~ a*(Fyb[1]+Fyb[2]) - b*(Fyb[3]+Fyb[4])
                    - tf/2*(Fxb[1]-Fxb[2]) - tr/2*(Fxb[3]-Fxb[4]) + Mz[1]+Mz[2]+Mz[3]+Mz[4] + Mz_ext,
 
         D(z) ~ w,
-        (M_s - tank.m_burn)*D(w) ~ ΣFs - (M_s - tank.m_burn)*g - Laf - Lar,
+
+        (M_s - tank.m_burn)*D(w) ~ ΣFs - (M_s - tank.m_burn)*g - Laf - Lar + mc*u*r*sgy,
         az ~ D(w) + g,
         D(th) ~ q,
         Iyy*D(q) ~ (xs[1]*Fsusp[1]+xs[2]*Fsusp[2]+xs[3]*Fsusp[3]+xs[4]*Fsusp[4]) + h*ΣFx + tank.m_burn*g*tank.x - a*Laf + b*Lar,

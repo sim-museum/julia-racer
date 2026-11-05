@@ -512,6 +512,12 @@ function shots_step!(frames, vp, eye, W, H, place_at_s!, shot_idx, shot_t0, shot
     nothing
 end
 
+"""DATAMINE-1 S6: the window's state for a stall line. GNOME holds a minimised window's vsync swap for 1 s (measured: 16.6 ->
+1000.8 ms), and a full-screen window minimises when it loses focus (alt-tab): the PO's logs carry up to ~1000 such
+"(compile 0, gc 0)" ~1 s frames per session, all of them the game in the background, none while driving."""
+stall_win_tag() = GLFW.GetWindowAttrib(win, GLFW.ICONIFIED) != 0 ? "  [window minimised]" :
+                  GLFW.GetWindowAttrib(win, GLFW.FOCUSED) == 0 ? "  [window not focused]" : ""
+
 """PERF-4: name every stall over STALL_MS (compile / GC / other) and keep FRAME_FPS. (LOOPSPLIT-1 cycle 2 S3: moved unchanged from main())"""
 function stall_log!(cs, frames, inp, win_shown)
         if STALLLOG
@@ -525,7 +531,7 @@ function stall_log!(cs, frames, inp, win_shown)
                     println("  [stall] frame ", frames, " t=", round(cs.t, digits = 2), "s  ", round(_wall, digits = 1),
                             " ms (compile ", round(_cm, digits = 1), ", gc ", round(_gm, digits = 1), ")  gear ", cs.gear,
                             " thr ", round(inp.throttle, digits = 2), " clu ", round(inp.clutch, digits = 2),
-                            " brk ", round(inp.brake, digits = 2), " v ", round(cs.v, digits = 1)); flush(stdout)
+                            " brk ", round(inp.brake, digits = 2), " v ", round(cs.v, digits = 1), stall_win_tag()); flush(stdout)
                 end
             end
             STALL_PREV[1] = _now; STALL_PREV[2] = _ct; STALL_PREV[3] = _gt
