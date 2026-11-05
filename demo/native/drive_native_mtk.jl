@@ -363,8 +363,20 @@ const RAI_GRIDSEAT = get(ENV, "JM_RAI_GRIDSEAT", "1") != "0"
 const RAI_ROLLDIAG = get(ENV, "JM_RAI_ROLLDIAG", "0") != "0"
 const RAI_SOLID_LAUNCH = get(ENV, "JM_RAI_SOLID_LAUNCH", "0") != "0"; const RAI_SOLIDHITS = Ref(0)
 const RAI_CLASSICRAIL = get(ENV, "JM_RAI_CLASSICRAIL", "1") != "0"
-const RAI_UPSET_DEG = parse(Float64, get(ENV, "JM_RAI_UPSET_DEG", "35")); const RAI_UPSET_H = parse(Float64, get(ENV, "JM_RAI_UPSET_H", "1.5"))
+const RAI_UPSET_DEG = parse(Float64, get(ENV, "JM_RAI_UPSET_DEG", "45")); const RAI_UPSET_H = parse(Float64, get(ENV, "JM_RAI_UPSET_H", "1.5"))
 const RAI_RESEAT_PACE = parse(Float64, get(ENV, "JM_RAI_RESEAT_PACE", "0.6"))
+
+const RAI_NOSNAP = get(ENV, "JM_RAI_NOSNAP", "1") != "0"
+const RAI_OFFHAT = Dict{Int,Int}()
+const RAI_WALLT = Dict{Int,Float64}()
+const RAI_NOSNAP_UPSET = get(ENV, "JM_RAI_NOSNAP_UPSET", "1") != "0"
+const RAI_OFFROAD_V = parse(Float64, get(ENV, "JM_RAI_OFFROAD_V", "15.0"))
+const RAI_RETIRE_S = parse(Float64, get(ENV, "JM_RAI_RETIRE_S", "15.0")); const RAI_REMOVE_S = parse(Float64, get(ENV, "JM_RAI_REMOVE_S", "6.0"))
+const RAI_REC = Dict{Int,Float64}()
+const RAI_PROGT = Dict{Int,Tuple{Float64,Float64}}()
+const RAI_OUT = Dict{Int,Float64}()
+const RAI_GONE = Set{Int}()
+rai_nosnap_reset!() = (empty!(RAI_OFFHAT); empty!(RAI_CLASSICW); empty!(RAI_WALLT); empty!(RAI_REC); empty!(RAI_PROGT); empty!(RAI_OUT); empty!(RAI_GONE); nothing)
 const AI_GRID_LEVEL = get(ENV, "JM_AI_GRID_LEVEL", "0") != "0"
 const RAI_HDIAG = get(ENV, "JM_RAI_HDIAG", "0") != "0"; const RAI_HLAST = Dict{Int,Float64}()
 const RAI_RESEAT = get(ENV, "JM_RAI_RESEAT", "1") != "0"
@@ -3481,6 +3493,28 @@ function classicwall_clamp!(c)
     nothing
 end
 
+const RAI_CLASSICWALL = get(ENV, "JM_RAI_CLASSICWALL", "0") != "0"
+const RAI_CLASSICW = Dict{Int,Tuple{Tuple{Float64,Float64},Float64,Int}}()
+const RAI_CLASSICW_LASTG = Ref((0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+const RAI_CLASSICW_MINW = parse(Float64, get(ENV, "JM_RAI_CLASSICW_MINW", "2.5"))
+function ai_classicwall_clamp!(i::Int, c)
+    sv = (CLASSICW_LAST[], CLASSICW_PREV[], CLASSICW_HINT[], CLASSICW_STAT[])
+    st = get(RAI_CLASSICW, i, ((NaN, NaN), NaN, 0))
+    CLASSICW_LAST[] = st[1]; CLASSICW_PREV[] = st[2]; CLASSICW_HINT[] = st[3]
+    g = classicwall_gaps(c.x, c.z, c.θ)
+    dv = 0.0
+    RAI_CLASSICW_LASTG[] = (g[1], g[2], g[3], g[4], g[5], g[10])
+
+    if min(g[4], g[5], g[10]) < -CLASSICW_PEN - 0.01 && g[3] - g[2] >= RAI_CLASSICW_MINW
+        v0 = hypot(DriveRT3D.world_velocity(c)...)
+        classicwall_clamp!(c)
+        dv = v0 - hypot(DriveRT3D.world_velocity(c)...)
+    end
+    RAI_CLASSICW[i] = (CLASSICW_LAST[], CLASSICW_PREV[], CLASSICW_HINT[])
+    CLASSICW_LAST[] = sv[1]; CLASSICW_PREV[] = sv[2]; CLASSICW_HINT[] = sv[3]; CLASSICW_STAT[] = sv[4]
+    dv
+end
+
 const AIJIT_ON      = CLASSICW_ON && get(ENV, "JM_AIJIT", "1") != "0"
 const AIJIT_TAU_LAT = parse(Float64, get(ENV, "JM_AIJIT_TAU_LAT", "0.25"))
 const AIJIT_TAU_YAW = parse(Float64, get(ENV, "JM_AIJIT_TAU_YAW", "0.06"))
@@ -5126,6 +5160,7 @@ const SHOT_SETTLE = parse(Int, get(ENV, "JM_SHOT_SETTLE", "38"))
 const WHEELGAP = parse(Int, get(ENV, "JM_WHEELGAP", "0"))
 const PACE_ON  = get(ENV, "JM_PACE", "1") != "0"
 const DSTAT = get(ENV, "JM_DRAWSTATS", "0") != "0"; const GPUSYNC = get(ENV, "JM_GPUSYNC", "0") != "0"
+const AISTEP_DIAG = get(ENV, "JM_AISTEP_DIAG", "0") != "0"; const AISTEP_ACC = zeros(3)
 const DS_LOOP = Ref(0.0); const DS_PREV = Ref(0.0); const DS_SIM = zeros(2); const DS_T0 = Ref(0.0); const DS_SIMACC = zeros(3); const DS_T = zeros(6); const DS_ACC = zeros(5); const DS_N = zeros(Int, 6); const DS_NA = zeros(Int, 6); const DS_CNT = Ref(0)
 const ALLOCSITES = get(ENV, "JM_ALLOCSITES", "0") != "0"
 const ALLOCPROF = parse(Int, get(ENV, "JM_ALLOCPROF", "0"))
@@ -10392,6 +10427,46 @@ function main()
     end
 
     groundz_ai(x, y) = (r = ground_road(x, y); r[2] ? Float32(r[1] + kerb_bump(x, y) + road_rough(x, y)) : Float32(objground_at(x, y)))
+
+    if get(ENV, "JM_GZBENCH", "0") != "0" && !SKIDPAD
+        let pts = [(TRKSURF.pos[k][1] + 2.0*TRKSURF.perp[k][1], TRKSURF.pos[k][3] + 2.0*TRKSURF.perp[k][3]) for k in 1:7:length(TRKSURF.pos)]
+            acc = 0.0
+            for (x, z) in pts; acc += groundz_ai(x, z); end
+            t0 = time_ns()
+            for _ in 1:5, (x, z) in pts; acc += groundz_ai(x, z); end
+            dt_ = (time_ns() - t0)/(5*length(pts))
+            t1 = time_ns()
+            for _ in 1:5, (x, z) in pts; acc += ground_road(x, z)[1]; end
+            dr_ = (time_ns() - t1)/(5*length(pts))
+            println("  [gzbench] groundz_ai ", round(dt_/1000, digits = 2), " us/call, ground_road ", round(dr_/1000, digits = 2), " us/call over ",
+                    length(pts), " road points (x 40 per car-frame = ", round(40*dt_/1e6, digits = 3), " ms) ", acc > 1e30 ? "" : "")
+        end
+    end
+
+    for spec in filter(!isempty, split(get(ENV, "JM_GZAI_PROBE", ""), ";"))
+        let (px, z0, z1, dz) = parse.(Float64, split(spec, ":"))
+            for pz in z0:dz:z1
+                r = ground_road(px, pz)
+                println("  [gzaiprobe] (", px, ", ", pz, "): groundz_ai ", round(groundz_ai(px, pz), digits = 3), "  road ", round(r[1], digits = 3),
+                        r[2] ? " (found)" : " (-)", "  objground ", round(objground_at(px, pz), digits = 3),
+                        (hr = JRTrack.hat(TRKSURF, px, pz); hr.found ? string("  | s ", round(hr.lapdist, digits = 1), " lat ", round(hr.lateral, digits = 2),
+                         " spline ", round(trk_road(hr.lapdist, hr.lateral), digits = 3), " corr ", round(trk_corr(hr.lapdist, hr.lateral), digits = 3),
+                         " conf ", round(trk_conf(hr.lapdist, hr.lateral), digits = 2), " mesh ", round(mesh_ground(px, pz, trk_road(hr.lapdist, hr.lateral) + 3.0)[1], digits = 3)) : "  | no hat"))
+            end
+        end
+    end
+
+    for spec in filter(!isempty, split(get(ENV, "JM_TERRPROBE", ""), ";"))
+        let (px, z0, z1, dz) = parse.(Float64, split(spec, ":"))
+            for pz in z0:dz:z1
+                r = ground_road(px, pz); ti = JRTrack.hat3d(TERRAIN, px, pz; ref = Inf); tr = JRTrack.hat3d(TERRAIN, px, pz; ref = r[1] + 3.0)
+                hr = JRTrack.hat(TRKSURF, px, pz)
+                println("  [terrprobe] (", px, ", ", pz, ")", hr.found ? string(" s ", round(hr.lapdist, digits = 1), " lat ", round(hr.lateral, digits = 2)) : "",
+                        ": road ", round(r[1], digits = 2), r[2] ? "" : " (-)", "  TERRAIN(Inf) ", ti[3] ? round(ti[1], digits = 2) : "none",
+                        "  TERRAIN(road+3) ", tr[3] ? round(tr[1], digits = 2) : "none", "  objground ", round(objground_at(px, pz, r[1] + 3.0), digits = 2))
+            end
+        end
+    end
     cs0 = SKIDPAD ? (x=0.0, z=0.0, θ=0.0) : spawn(CAR; v0=0.0)
     LASTZ = Ref(0.0); ONTRACK = Ref(true)
     LASTGX = Ref(cs0.x); LASTGZ = Ref(cs0.z)
@@ -10400,9 +10475,11 @@ function main()
     BND_FX = Ref(0.0); BND_FY = Ref(0.0); BND_MZ = Ref(0.0)
 
     WALL_CLIMB = parse(Float64, get(ENV, "JM_WALL_CLIMB", "3.0"))
-    function groundz(x, z; acquire = false)
+
+    function groundz(x, z; acquire = false, hold = true)
         SKIDPAD && return 0.0
         h = JRTrack.hat3d(TERRAIN, x, z; ref=Inf)
+        hold || return h[3] ? Float64(h[1]) : LASTZ[]
 
         if h[3] && (acquire || !MONZA || Float64(h[1]) <= LASTZ[] + WALL_CLIMB)
             LASTZ[] = Float64(h[1]); ONTRACK[] = true
@@ -10410,6 +10487,25 @@ function main()
             ONTRACK[] = false
         end
         LASTZ[]
+    end
+
+    if get(ENV, "JM_LASTZ_TEST", "") != "" && !SKIDPAD
+        let (qx, qz) = parse.(Float64, split(ENV["JM_LASTZ_TEST"], ":"))
+            l0 = groundz(cs0.x, cs0.z; acquire = true); q = groundz(qx, qz; hold = false); l1 = LASTZ[]
+            groundz(qx, qz; acquire = true); l2 = LASTZ[]; groundz(cs0.x, cs0.z; acquire = true)
+            println("  [lastztest] player LASTZ ", round(l0, digits = 2), "; pure query at (", qx, ", ", qz, ") = ", round(q, digits = 2),
+                    " -> LASTZ ", round(l1, digits = 2), " (", l1 == l0 ? "unchanged" : "CHANGED", "); old held query -> LASTZ ", round(l2, digits = 2),
+                    " (", l2 == l0 ? "unchanged" : "changed", ")")
+        end
+    end
+
+    for spec in filter(!isempty, split(get(ENV, "JM_TERRPROBE2", ""), ";"))
+        let (px, z0, z1, dz) = parse.(Float64, split(spec, ":"))
+            groundz(px, z1; acquire = true)
+            for pz in z1:-dz:z0
+                println("  [terrprobe2] (", px, ", ", pz, "): groundz_phys ", round(groundz_phys(px, pz), digits = 2), "  LASTZ ", round(LASTZ[], digits = 2))
+            end
+        end
     end
     y0spawn = groundz(cs0.x, cs0.z; acquire=true)
 
@@ -10613,7 +10709,7 @@ function main()
             for ds in 0.0:5.0:160.0
                 sp = RaceAI.pose_at(CLINE, min(s0+ds, CLINE.total), 0.0)
                 hrb = JRTrack.hat(TRKSURF, sp[1], sp[3])
-                g = groundz(sp[1], sp[3])
+                g = groundz(sp[1], sp[3]; hold = false)
                 println("     +", rpad(Int(ds),4), "m  groundz=", rpad(round(g,digits=1),7),
                         " ribbon=", rpad(hrb.found ? round(hrb.height,digits=1) : "MISS",7),
                         " lat=", rpad(round(hrb.lateral,digits=1),6), " ontrack=", ONTRACK[])
@@ -10942,6 +11038,101 @@ function main()
                         if !_refuse
                         RaceAI.set_classic_lateral!(cr, c1, c2)
 
+                        if get(ENV, "JM_RAI_DEKINK", "1") != "0"
+                            let st = 2.0
+                                local ns_, P_, C_, Nn_, R_, kap_, jog_, w_, corr_, nrec_, hd_, sh_, s, q, q0, q1, a, b, c, cr_, d, dh, js, dk, sx, sz, p_, qx, qz, P
+                                ns_ = floor(Int, AILINE.total / st); R_ = zeros(ns_); P_ = Vector{NTuple{2,Float64}}(undef, ns_)
+                                C_ = similar(P_); Nn_ = similar(P_)
+                                for k in 1:ns_
+                                    s = (k - 1)*st; R_[k] = RaceAI.classic_racelane(AILINE, s)
+                                    q = RaceAI.pose_at(AILINE, s, R_[k]); P_[k] = (q[1], q[3])
+                                    q0 = RaceAI.pose_at(AILINE, s, 0.0); q1 = RaceAI.pose_at(AILINE, s, 1.0)
+                                    C_[k] = (q0[1], q0[3]); Nn_[k] = (q1[1] - q0[1], q1[3] - q0[3])
+                                end
+                                P(k) = P_[mod1(k, ns_)]
+                                hd_(k) = let u_ = P(k + 1), v_ = P(k - 1); atan(u_[2] - v_[2], u_[1] - v_[1]) end
+                                kap_ = zeros(ns_); jog_ = falses(ns_)
+                                for k in 1:ns_
+                                    a = P(k - 2); b = P(k); c = P(k + 2)
+                                    cr_ = (b[1] - a[1])*(c[2] - b[2]) - (b[2] - a[2])*(c[1] - b[1])
+                                    d = hypot(b[1] - a[1], b[2] - a[2])*hypot(c[1] - b[1], c[2] - b[2])*hypot(c[1] - a[1], c[2] - a[2])
+                                    kap_[k] = d > 1e-9 ? 2cr_/d : 0.0
+                                    dh = hd_(k + 7) - hd_(k - 7); dh = atan(sin(dh), cos(dh))
+                                    jog_[k] = abs(kap_[k]) > 0.03 && abs(dh) < deg2rad(10)
+                                end
+                                w_ = zeros(ns_); js = findall(jog_)
+                                for k in 1:ns_, j in js
+                                    dk = abs(k - j); dk = min(dk, ns_ - dk)*st
+                                    w_[k] = max(w_[k], dk <= 30.0 ? 1.0 : dk <= 50.0 ? 1.0 - (dk - 30.0)/20.0 : 0.0)
+                                end
+                                corr_ = zeros(ns_)
+                                for k in 1:ns_
+                                    w_[k] > 0 || continue
+                                    sx = 0.0; sz = 0.0
+                                    for j in -7:7; p_ = P(k + j); sx += p_[1]; sz += p_[2]; end
+                                    qx = sx/15 - C_[k][1]; qz = sz/15 - C_[k][2]
+                                    corr_[k] = w_[k]*((qx*Nn_[k][1] + qz*Nn_[k][2]) - R_[k])
+                                end
+                                nrec_ = length(cr)
+                                sh_ = [corr_[clamp(round(Int, ((r - 1)*AILINE.total/nrec_)/st) + 1, 1, ns_)] for r in 1:nrec_]
+                                cr .+= sh_; c1 .+= sh_; c2 .+= sh_
+                                RaceAI.set_classic_lateral!(cr, c1, c2)
+                                println("  [ailine] de-kink: ", length(js), " jog points (", round(Int, st*length(js)), " m), lane shifted on ",
+                                        round(Int, st*count(>(0), w_)), " m, max ", round(maximum(abs.(corr_); init = 0.0), digits = 2), " m",
+                                        isempty(js) ? "" : string(" (worst at s ", round(Int, st*(js[argmax(abs.(kap_[js]))] - 1)), ")"), " (JM_RAI_DEKINK=0: off)")
+                            end
+                        end
+
+                        if CLASSICW_ON && get(ENV, "JM_RAI_LINEAUDIT", "1") != "0"
+                            let dl = Float64.(CLASSICLP.read_lp(lp).dlat), N = length(dl), L = CLASSICWALLS.seclen, c0 = cumsum(L) .- L, lap = sum(L), st = 2.0,
+                                pts = Tuple{Float64,Int,Float64,Float64}[]
+
+                                local rl, q, loc, w, g, d, wrong, edge, sg, glat, fi, same, runs_, kk_au, pp_au, a1_au, b1_au, a2_au, b2_au, a3_au, b3_au,
+                                      cr_au, d1_au, d2_au, d3_au, kp_au
+                                for s in 0.0:st:AILINE.total - st
+                                    rl = something(RaceAI.classic_racelane(AILINE, s), RaceAI.racelane(AILINE, s))
+                                    q = RaceAI.pose_at(AILINE, s, rl); loc = classicw_locate_any(q[1], q[3]); loc === nothing && continue
+                                    push!(pts, (s, loc[1], loc[2], loc[3]))
+                                end
+                                glat(sec, f) = dl[mod1(round(Int, (c0[sec] + f*L[sec]) / lap * N) + 1, N)]
+                                fi(sec, f, x) = CLASSICWall.free_interval(CLASSICWALLS, sec, f, x, x; hmin = CLASSICW_HMIN)
+                                same(sg) = count(p -> fi(p[2], p[3], p[4])[1:2] == fi(p[2], p[3], sg*glat(p[2], p[3]))[1:2], pts)
+                                sg = same(1.0) >= same(-1.0) ? 1.0 : -1.0
+                                wrong = Tuple{Float64,Float64}[]; edge = Tuple{Float64,Float64}[]
+                                for (s, sec, f, lat) in pts
+                                    w = fi(sec, f, lat); g = fi(sec, f, sg*glat(sec, f))
+                                    if w[1:2] != g[1:2]
+                                        push!(wrong, (s, min(abs(lat - g[1]), abs(lat - g[2]))))
+                                    else
+                                        d = max(w[1] + 0.9 - lat, lat - (w[2] - 0.9), 0.0); d > 0.0 && push!(edge, (s, d))
+                                    end
+                                end
+                                function runs_(v, u = "m")
+                                    r = Tuple{Float64,Float64,Float64}[]
+                                    for (s, d) in v
+                                        (!isempty(r) && s - r[end][2] <= 2st) ? (r[end] = (r[end][1], s, max(r[end][3], d))) : push!(r, (s, s, d))
+                                    end
+                                    isempty(r) ? "" : ": " * join((string("s ", round(Int, x[1]), "-", round(Int, x[2]), " (", round(x[3], digits = 2), " ", u, ")")
+                                                                  for x in first(sort(r; by = x -> -x[3]), 10)), ", ")
+                                end
+                                println("  [ailine] AI racing line vs Classic's road (Classic's race line's corridor, sign ", sg, ", ", same(sg), " of ", length(pts),
+                                        " points agree): WRONG corridor ", round(Int, st*length(wrong)), " m", runs_(wrong), "; EDGE (< 0.9 m to a wall face) ",
+                                        round(Int, st*length(edge)), " m", runs_(edge), " (JM_RAI_LINEAUDIT=0: off)")
+
+                                kk_au = Tuple{Float64,Float64}[]
+                                pp_au(s) = (q = RaceAI.pose_at(AILINE, s, something(RaceAI.classic_racelane(AILINE, s), RaceAI.racelane(AILINE, s))); (q[1], q[3]))
+                                for s in 0.0:st:AILINE.total - st
+                                    (a1_au, b1_au) = pp_au(s - 5.0); (a2_au, b2_au) = pp_au(s); (a3_au, b3_au) = pp_au(s + 5.0)
+                                    cr_au = (a2_au - a1_au)*(b3_au - b2_au) - (b2_au - b1_au)*(a3_au - a2_au); d1_au = hypot(a2_au - a1_au, b2_au - b1_au); d2_au = hypot(a3_au - a2_au, b3_au - b2_au); d3_au = hypot(a3_au - a1_au, b3_au - b1_au)
+                                    kp_au = (d1_au*d2_au*d3_au > 1e-6) ? 2cr_au/(d1_au*d2_au*d3_au) : 0.0
+                                    abs(kp_au) > 0.03 && push!(kk_au, (s, abs(kp_au)))
+                                end
+                                println("  [ailine] AI path curvature > 0.03 /m (R < 33 m): ", round(Int, st*length(kk_au)), " m", runs_(kk_au, "/m peak"),
+                                        "; the line's own kappa there: ", isempty(kk_au) ? "-" : join((string(round(Int, s), ":", round(RaceAI.curv_at(AILINE, s), digits = 3))
+                                        for (s, _) in first(sort(kk_au; by = x -> -x[2]), 5)), " "))
+                            end
+                        end
+
                         if ROADHAT !== TERRAIN0
                             let (fr, nr) = onroad_frac(Float64.(CLASSICLP.read_lp(lp).dlat)),
                                 (f1, n1) = onroad_frac(g1), (f2, n2) = onroad_frac(g2)
@@ -11008,7 +11199,7 @@ function main()
     if _DX_LINE_Y && AILINE !== nothing
         n = length(AILINE.x); diffs = Float64[]
         for k in 1:max(1, n ÷ 200):n
-            g = groundz(AILINE.x[k], AILINE.z[k])
+            g = groundz(AILINE.x[k], AILINE.z[k]; hold = false)
             push!(diffs, AILINE.y[k] - Float64(g))
         end
         sort!(diffs)
@@ -11069,7 +11260,7 @@ function main()
 
         if RAI_GRIDSEAT
             for (i, p) in enumerate(poses)
-                gh = groundz(p[1], p[2]); DriveRT3D.reseat3d!(AIPHYS[i], p[1], p[2], p[3]; v = 0.0, h = gh > -900 ? Float64(gh) : NaN)
+                gh = groundz(p[1], p[2]; hold = false); DriveRT3D.reseat3d!(AIPHYS[i], p[1], p[2], p[3]; v = 0.0, h = gh > -900 ? Float64(gh) : NaN)
             end
         end
         println("done")
@@ -11502,7 +11693,7 @@ function main()
 
             (AI_PHYSICS && RAI_HDIAG) && println("  [aigrid] AI ", i, " from y ", round(AIPHYS[i].y, digits = 2), " zref ",
                                                   round(AIPHYS[i].zref, digits = 2), " roll ", round(AIPHYS[i].roll, digits = 2), " to the grid")
-            AI_PHYSICS && (gp = RaceAI.pose_at(AILINE, c.s, c.lane); gh = groundz(gp[1], gp[3]);
+            AI_PHYSICS && (gp = RaceAI.pose_at(AILINE, c.s, c.lane); gh = groundz(gp[1], gp[3]; hold = false);
                            RAI_GRIDSEAT ? DriveRT3D.reseat3d!(AIPHYS[i], gp[1], gp[3], gp[4]; v = 0.0, h = gh > -900 ? Float64(gh) : NaN) :
                                           AIplace!(AIPHYS[i], gp[1], gp[3], gp[4]; v = 0.0))
         end

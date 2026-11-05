@@ -5,10 +5,10 @@ const CAR_IYY = 850.0; const CAR_IXX = 120.0; const CAR_HCG = 0.30
 
 const NOSE_H = 0.18; const BODY_H = 0.30
 
-const TREAD_MU = parse(Float64, get(ENV, "JM_TREAD_MU", "0.7"))
+const TREAD_MU = parse(Float64, get(ENV, "JM_TREAD_MU", "0.15"))
 const CONTACT_VERT = get(ENV, "JM_CONTACT_VERT", "1") != "0"
 const TYRE_MU = parse(Float64, get(ENV, "JM_TYRE_CONTACT_MU", "1.0"))
-const TYRE_E = parse(Float64, get(ENV, "JM_TYRE_CONTACT_E", "0.5"))
+const TYRE_E = parse(Float64, get(ENV, "JM_TYRE_CONTACT_E", "0.2"))
 const CARCONTACT_OLD = get(ENV, "JM_CARCONTACT", "") == "old"
 
 const CAR_PARTS = (

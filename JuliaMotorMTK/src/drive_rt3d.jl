@@ -547,6 +547,14 @@ air_density(track::AbstractString) = haskey(ENV, "JM_AIR_RHO") ? parse(Float64, 
 "Set the car's air density (drag, lift, engine)."
 set_air!(c, ρ) = ModelingToolkit.setp(c.sys, c.sys.ρair)(c.integ, ρ)
 
+_phys_jac() = get(ENV, "JM_PHYS_JAC", "1") != "0"
+
+function _phys_alg(n)
+    _phys_jac() && return Rosenbrock23()
+    m = get(ENV, "JM_PHYS_AD", "chunk")
+    m == "fd" ? Rosenbrock23(autodiff = AutoFiniteDiff()) : m == "ad" ? Rosenbrock23() : Rosenbrock23(autodiff = AutoForwardDiff(chunksize = n))
+end
+
 function build_car3d(; x0 = 0.0, z0 = 0.0, θ0 = 0.0, v0 = 0.0, y0 = 0.0,
                      brush = !haskey(ENV, "JM_MAGIC"), dt = 1/300)
     SLOPE_G[] = get(ENV, "JM_SLOPE_GRAVITY", "1") != "0"
@@ -558,9 +566,9 @@ function build_car3d(; x0 = 0.0, z0 = 0.0, θ0 = 0.0, v0 = 0.0, y0 = 0.0,
                     a = cg_arms()[1], b = cg_arms()[2]; _car..., _chassis_kw()...))
     println(brush ? "  TYRE (3-D): physics-based brush model (default)" : "  TYRE (3-D): Magic-Formula tyre (JM_MAGIC)")
     prob = ODEProblem(sys, [sys.u => v0, sys.ωf => v0/0.30, _wheel_u0(sys, v0)...,
-                            sys.ωe => 209.4, sys.X => x0, sys.Y => z0, sys.ψ => θ0], (0.0, 1e7))
+                            sys.ωe => 209.4, sys.X => x0, sys.Y => z0, sys.ψ => θ0], (0.0, 1e7); jac = _phys_jac())
 
-    integ = init(prob, Rosenbrock23(); save_everystep = false, dense = false, adaptive = false, dt = dt)
+    integ = init(prob, _phys_alg(length(prob.u0)); save_everystep = false, dense = false, adaptive = false, dt = dt)
     ModelingToolkit.setp(sys, sys.antistall)(integ, ANTISTALL[] ? 1.0 : 0.0)
     getall = ModelingToolkit.getsym(sys, [sys.X, sys.Y, sys.ψ, sys.u, sys.v, sys.rpm,
         sys.FL.Fx, sys.FR.Fx, sys.RL.Fx, sys.RR.Fx, sys.FL.Fy, sys.FR.Fy, sys.RL.Fy, sys.RR.Fy,
@@ -612,10 +620,20 @@ function _build_cars3d(poses; brush = !haskey(ENV, "JM_MAGIC"), dt = 1/300)
         sys.FL.Fx, sys.FR.Fx, sys.RL.Fx, sys.RR.Fx, sys.FL.Fy, sys.FR.Fy, sys.RL.Fy, sys.RR.Fy,
         sys.z, sys.th, sys.ph, sys.az, sys.FzFL, sys.FzFR, sys.FzRL, sys.FzRR, sys.ωr])
     cars=Car3D[]
+
+    prob0 = nothing
     for (x0,z0,θ0,v0) in poses
-        prob = ODEProblem(sys, [sys.u=>v0, sys.ωf=>v0/0.30, _wheel_u0(sys, v0)...,
-                                sys.ωe=>209.4, sys.X=>x0, sys.Y=>z0, sys.ψ=>θ0], (0.0,1e7))
-        integ = init(prob, Rosenbrock23(); save_everystep=false, dense=false, adaptive=false, dt=dt)
+        u0map = [sys.u=>v0, sys.ωf=>v0/0.30, _wheel_u0(sys, v0)..., sys.ωe=>209.4, sys.X=>x0, sys.Y=>z0, sys.ψ=>θ0]
+        if prob0 === nothing
+            prob0 = ODEProblem(sys, u0map, (0.0,1e7); jac = _phys_jac()); prob = prob0
+        else
+            u0 = copy(prob0.u0)
+            for (k, v) in u0map
+                ix = ModelingToolkit.variable_index(sys, k); ix === nothing || (u0[ix] = v)
+            end
+            prob = remake(prob0; u0 = u0, p = deepcopy(prob0.p))
+        end
+        integ = init(prob, _phys_alg(length(prob.u0)); save_everystep=false, dense=false, adaptive=false, dt=dt)
         c = Car3D(sys, integ, s_thr,s_brk,s_st,s_gr,s_clu,s_we, s_zr, s_vr, s_pos,s_vel, s_vreset,
                   s_fx,s_fy,s_mz,s_cda, s_mu,
                   getall, 1, 0.0, ntuple(_->0.0,4),
@@ -665,6 +683,65 @@ _vstate(c) = get!(_VSTATE, c.sys) do
     vs = [c.sys.w, c.sys.wFL.vu, c.sys.wFR.vu, c.sys.wRL.vu, c.sys.wRR.vu]
     (ModelingToolkit.getsym(c.sys, vs), ModelingToolkit.setu(c.sys, vs))
 end
+
+const _GET9 = IdDict{Any,Any}()
+_get9(c) = get!(_GET9, c.sys) do
+    ModelingToolkit.getsym(c.sys, [c.sys.X, c.sys.Y, c.sys.ψ, c.sys.u, c.sys.v, c.sys.FzFL, c.sys.FzFR, c.sys.FzRL, c.sys.FzRR])
+end
+function _substeps!(c, integ, getall, get9, szr, svr, groundz, nsub, subdt)
+    a = get9(integ)
+    terr = ntuple(_->0.0, 4)
+    grounded_last = false
+    for _ in 1:nsub
+        x = a[1]; z = a[2]; θ = a[3]; cosθ = cos(θ); sinθ = sin(θ)
+        u = a[4]; v = a[5]
+        vwx = u*cosθ - v*sinθ;  vwz = u*sinθ + v*cosθ
+        spd = hypot(vwx, vwz); dirx = spd>0.5 ? vwx/spd : cosθ;  dirz = spd>0.5 ? vwz/spd : sinθ
+        terr_s = ntuple(4) do i
+            xi, yi = WHEELS[i]
+            wx = x + xi*cosθ - yi*sinθ;  wz = z + xi*sinθ + yi*cosθ
+            h = groundz(wx, wz);  isfinite(h) ? Float64(h) : c.zref
+        end
+
+        dL = 1.0
+        vr = ntuple(4) do i
+            xi, yi = WHEELS[i]
+            wx = x + xi*cosθ - yi*sinθ;  wz = z + xi*sinθ + yi*cosθ
+            ha = groundz(wx + dirx*dL, wz + dirz*dL)
+            isfinite(ha) ? clamp((Float64(ha) - terr_s[i]) / dL * spd, -25.0, 25.0) : 0.0
+        end
+        terr_cg = sum(terr_s)/4
+        ΣFz = a[6] + a[7] + a[8] + a[9]
+        grounded = ΣFz > 0.15 * 617 * 9.80665
+        grounded_last = grounded; c.grounded = grounded
+        _slope_gravity!(c, terr_s, grounded, subdt)
+        vr_cg = (vr[1]+vr[2]+vr[3]+vr[4])/4
+
+        if VFRAME_INERTIAL
+
+            vref = isfinite(terr_cg) ? vr_cg + clamp(terr_cg - c.zref, -1.5, 1.5)*10.0 : get(_VREF, c, 0.0)
+
+            vref0 = get(_VREF, c, vref)
+            if vref != vref0
+                gs = _vstate(c)
+                gs[2](integ, gs[1](integ) .+ (vref0 - vref)); OrdinaryDiffEq.SciMLBase.u_modified!(integ, true)
+            end
+            _VREF[c] = vref; c.zref += vref*subdt
+            zr = ntuple(i -> terr_s[i] - c.zref, 4)
+            for i in 1:4; szr[i](integ, zr[i]); svr[i](integ, vr[i] - vref); end
+        else
+        (grounded && isfinite(terr_cg)) && (c.zref += vr_cg*subdt + clamp(terr_cg - c.zref, -1.5, 1.5)*10.0*subdt)
+        zr = ntuple(i -> terr_s[i] - c.zref, 4)
+        for i in 1:4; szr[i](integ, zr[i]); svr[i](integ, vr[i]); end
+        end
+        c.zr_prev = zr
+        step!(integ, subdt, true)
+        a = get9(integ)
+        terr = terr_s
+    end
+    return getall(integ), terr, grounded_last
+end
+
 "Advance the 3-D car by dt.  Inputs as DriveRT.step_car!.  `groundz(x,z)->h`
 gives terrain elevation (used to drive the suspension under each wheel)."
 function step_car3d!(c::Car3D, throttle, brake, steer, dt;
@@ -708,55 +785,7 @@ function step_car3d!(c::Car3D, throttle, brake, steer, dt;
     c.s_st(c.integ, clamp(steer, -lock, lock) * MAXSTEER)
 
     Δ = max(dt, 1e-3); nsub = max(1, round(Int, Δ*300)); subdt = Δ/nsub
-    local a = c.getall(c.integ)
-    local terr = ntuple(_->0.0, 4)
-    local grounded_last = false
-    for _ in 1:nsub
-        x = a[1]; z = a[2]; θ = a[3]; cosθ = cos(θ); sinθ = sin(θ)
-        u = a[4]; v = a[5]
-        vwx = u*cosθ - v*sinθ;  vwz = u*sinθ + v*cosθ
-        spd = hypot(vwx, vwz); dirx = spd>0.5 ? vwx/spd : cosθ;  dirz = spd>0.5 ? vwz/spd : sinθ
-        terr = ntuple(4) do i
-            xi, yi = WHEELS[i]
-            wx = x + xi*cosθ - yi*sinθ;  wz = z + xi*sinθ + yi*cosθ
-            h = groundz(wx, wz);  isfinite(h) ? Float64(h) : c.zref
-        end
-
-        dL = 1.0
-        vr = ntuple(4) do i
-            xi, yi = WHEELS[i]
-            wx = x + xi*cosθ - yi*sinθ;  wz = z + xi*sinθ + yi*cosθ
-            ha = groundz(wx + dirx*dL, wz + dirz*dL)
-            isfinite(ha) ? clamp((Float64(ha) - terr[i]) / dL * spd, -25.0, 25.0) : 0.0
-        end
-        terr_cg = sum(terr)/4
-        ΣFz = a[19] + a[20] + a[21] + a[22]
-        grounded = ΣFz > 0.15 * 617 * 9.80665
-        grounded_last = grounded; c.grounded = grounded
-        _slope_gravity!(c, terr, grounded, subdt)
-        vr_cg = (vr[1]+vr[2]+vr[3]+vr[4])/4
-
-        if VFRAME_INERTIAL
-
-            vref = isfinite(terr_cg) ? vr_cg + clamp(terr_cg - c.zref, -1.5, 1.5)*10.0 : get(_VREF, c, 0.0)
-
-            vref0 = get(_VREF, c, vref)
-            if vref != vref0
-                gs = _vstate(c)
-                gs[2](c.integ, gs[1](c.integ) .+ (vref0 - vref)); OrdinaryDiffEq.SciMLBase.u_modified!(c.integ, true)
-            end
-            _VREF[c] = vref; c.zref += vref*subdt
-            zr = ntuple(i -> terr[i] - c.zref, 4)
-            for i in 1:4; c.s_zr[i](c.integ, zr[i]); c.s_vr[i](c.integ, vr[i] - vref); end
-        else
-        (grounded && isfinite(terr_cg)) && (c.zref += vr_cg*subdt + clamp(terr_cg - c.zref, -1.5, 1.5)*10.0*subdt)
-        zr = ntuple(i -> terr[i] - c.zref, 4)
-        for i in 1:4; c.s_zr[i](c.integ, zr[i]); c.s_vr[i](c.integ, vr[i]); end
-        end
-        c.zr_prev = zr
-        step!(c.integ, subdt, true)
-        a = c.getall(c.integ)
-    end
+    (a, terr, grounded_last) = _substeps!(c, c.integ, c.getall, _get9(c), c.s_zr, c.s_vr, groundz, nsub, subdt)
     c.x = a[1]; c.z = a[2]; c.θ = a[3]
     c.v = sqrt(a[4]^2 + a[5]^2); c.t = c.integ.t + c.toff
 
@@ -798,7 +827,7 @@ function step_car3d!(c::Car3D, throttle, brake, steer, dt;
     μc = (1.36, 1.36, 1.40, 1.40)
     c.tc = ntuple(i -> (a[6+i]/mg4, a[10+i]/mg4, μc[i]*max(a[18+i],1.0)/mg4), 4)
 
-    c.rh = ntuple(i -> RIDE_H[][i] + (WHEELS[i][1]*c.pitch + WHEELS[i][2]*c.roll + c.heave) - (terr[i]-c.zref), 4)
+    c.rh = let terr_f = terr; ntuple(i -> RIDE_H[][i] + (WHEELS[i][1]*c.pitch + WHEELS[i][2]*c.roll + c.heave) - (terr_f[i]-c.zref), 4) end
 
     if JM_RH_DIAG[] && any(x -> !isfinite(x) || abs(x) > JM_RH_DIAG_T[], c.rh)
         _rhn[] += 1
