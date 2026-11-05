@@ -94,6 +94,7 @@ function texthud_draw!(cs, W, H, AICARS, best_lap, fmt_lap, lap_t0, last_lap, pl
                     for (i, e) in enumerate(st2)
                         if e[1] == 0
                             push!(cars, (0, cs.x, cs.z, i))
+                        elseif e[1] in RAI_GONE
                         elseif e[1] <= length(ai_poses)
                             q = ai_poses[e[1]]; push!(cars, (e[1], Float64(q[1]), Float64(q[3]), i))
                         end
@@ -525,7 +526,7 @@ function restart_session!(cs, cs0, groundz, groundz_phys, AICARS, AILINE, CLINE,
     WRECKED[] = false; WRECK_FROZEN[] = false; AIRBORNE[] = false; empty!(LOOSE_WHEELS)
     CLUTCH_GATE[] = -1.0
     TELLTALE[] = 0.0
-    empty!(AI_COOL); empty!(RAI_COOL); empty!(RAI_PITH)
+    empty!(AI_COOL); empty!(RAI_COOL); empty!(RAI_PITH); rai_nosnap_reset!()
 
     cs.laps = 0; lap_t0 = cs.t; last_lap = 0.0; best_lap = 0.0; prev_laps = 0
     race_done = false; empty!(player_laps)
@@ -566,7 +567,7 @@ function instant_replay_reset!()
     WRECKED[] = false; WRECK_FROZEN[] = false; AIRBORNE[] = false; WBODY[] = nothing; empty!(LOOSE_WHEELS); empty!(LOOSE_OF)
     ai_wheeloff_reset!()
     CLUTCH_GATE[] = -1.0; TELLTALE[] = 0.0; STUCK_T0[] = -1.0; RACEEND_T0[] = -1.0; WHEELOFF_MSG[] = 0.0; REP_BODY[] = (NaN, NaN)
-    empty!(AI_COOL); empty!(RAI_COOL); empty!(RAI_PITH); DriveRT3D.damage_reset!(); pitstop_reset!()
+    empty!(AI_COOL); empty!(RAI_COOL); empty!(RAI_PITH); rai_nosnap_reset!(); DriveRT3D.damage_reset!(); pitstop_reset!()
     nothing
 end
 
@@ -652,8 +653,8 @@ function player_drive_step!(cs, inp, dt, rst, groundz, groundz_phys, roll_ter, f
     (CLASSICW_PHYS && CAR3D && !rst && !CLASSICW_NEAR[] && OBS_ON) && (OBS_PREV[] = (cs.x, cs.z))
     end
 
-    step_loose_wheels!(dt > 1e-4 ? dt : 1/60, (gx, gzz) -> (h = groundz(gx, gzz); h > -900 ? Float64(h) : 0.0))
-    isempty(AI_LOOSE_WHEELS) || step_loose_wheels!(dt > 1e-4 ? dt : 1/60, (gx, gzz) -> (h = groundz(gx, gzz); h > -900 ? Float64(h) : 0.0), AI_LOOSE_WHEELS)
+    step_loose_wheels!(dt > 1e-4 ? dt : 1/60, (gx, gzz) -> (h = groundz(gx, gzz; hold = false); h > -900 ? Float64(h) : 0.0))
+    isempty(AI_LOOSE_WHEELS) || step_loose_wheels!(dt > 1e-4 ? dt : 1/60, (gx, gzz) -> (h = groundz(gx, gzz; hold = false); h > -900 ? Float64(h) : 0.0), AI_LOOSE_WHEELS)
     (ffb_jolt, _tgc)
 end
 
@@ -1335,7 +1336,7 @@ function ai_poses_step!(cs, ddt, ai_hit, rep_ai_raw, AICARS, AIPHYS, CLASSICAI_T
         NTuple{6,Float64}[]
     elseif !race_go[] || (AI_HEADSTART > 0 && ai_release[] >= 0.0 && cs.t < ai_release[])
 
-        AI_PHYSICS ? [(b = AI_GRID_LEVEL ? aibankP(pc) : aibankK((pc.x, groundz(pc.x, pc.z), pc.z, pc.θ)); (pc.x, groundz(pc.x, pc.z), pc.z, pc.θ, b[1], b[2])) for pc in AIPHYS] :
+        AI_PHYSICS ? [(b = AI_GRID_LEVEL ? aibankP(pc) : aibankK((pc.x, groundz(pc.x, pc.z; hold = false), pc.z, pc.θ)); (pc.x, groundz(pc.x, pc.z; hold = false), pc.z, pc.θ, b[1], b[2])) for pc in AIPHYS] :
         CLASSICAI_T !== nothing ? NTuple{6,Float64}[c.pose for c in classicai_field!().cars] :
                      [(p=RaceAI.pose_at(AILINE, c.s, c.lane); b=aibankK(p); ai_ground((p[1],p[2],p[3],p[4],b[1],b[2]))) for c in AICARS]
     elseif AI_PHYSICS
@@ -2508,7 +2509,7 @@ function loose_cars_step!(cs, ai_poses, ddt, AICARS, AILINE, CLASSICAI_T, PLAYER
                 " r ", round(DriveRT3D.yawrate3d(pc), digits = 2), " θ ", round(pc.θ, digits = 2), " grounded ", pc.grounded,
                 " rh ", round.(pc.rh, digits = 3), " heave ", round(pc.heave, digits = 3), " ddt ", round(ddt, digits = 4), " rec ", LOOSE_REC[sl])
             bk = aibankP(pc)
-            gy = isfinite(pc.y) ? pc.y : groundz(pc.x, pc.z)
+            gy = isfinite(pc.y) ? pc.y : groundz(pc.x, pc.z; hold = false)
             ai_poses[k] = (pc.x, gy, pc.z, pc.θ, bk[1], bk[2])
 
             if AIRBODY && CRASHBODY && maximum(pc.rh) > AIRBODY_RH
@@ -2549,7 +2550,7 @@ function loose_drop_step!(cs, AICARS, AILINE, groundz, frames)
         LOOSE_DROP_DONE[] = true
         p = RaceAI.pose_at(AILINE, s, lat)
         r = JRTrack.hat3d(TERRAIN, p[1], p[3]; ref = Inf); og = objground_at(p[1], p[3])
-        g = r[3] ? Float64(r[1]) : isfinite(og) ? og : Float64(groundz(p[1], p[3]))
+        g = r[3] ? Float64(r[1]) : isfinite(og) ? og : Float64(groundz(p[1], p[3]; hold = false))
         pc = LOOSE_CARS[1]
         DriveRT3D.pin3d!(pc, p[1], p[3], p[4], g + h); pc.s_vel(pc.integ, [0.0, 0.0]); pc.v = 0.0
         LOOSE_OF[1] = 1; LOOSE_T0[1] = cs.t; LOOSE_REC[1] = false; LOOSE_HITS[1] = 0
@@ -2591,7 +2592,7 @@ function loose_body_step!(k::Int, sl::Int, pc, gdt::Float64, groundz::G; dry::Bo
     b = dry ? WB.Body(WB.Geometry(m = DriveRT3D.MASS[])) : LOOSE_BODY[sl]
     dry && WB.start!(b, pc.x, pc.z, pc.y, pc.θ, 0.0, 0.0, V3(pc.v*cos(pc.θ), 0.0, -pc.v*sin(pc.θ)), V3(0.0, 0.0, 0.0))
 
-    hq(X, Z) = (og = objground_at(X, -Z); isfinite(og) ? og : (y = groundz(X, -Z); y > -900 ? Float64(y) : NaN))
+    hq(X, Z) = (og = objground_at(X, -Z); isfinite(og) ? og : (y = groundz(X, -Z; hold = false); y > -900 ? Float64(y) : NaN))
     pl = WB.fit_plane(hq, b.p[1], b.p[3])
     (isfinite(pl.h0) && isfinite(pl.gx) && isfinite(pl.gz)) ? (dry || (LOOSE_BPLANE[sl] = pl)) : (pl = LOOSE_BPLANE[sl])
 
@@ -2620,7 +2621,7 @@ function loose_body_step!(k::Int, sl::Int, pc, gdt::Float64, groundz::G; dry::Bo
     wvx = landed ? b.v[1] : 0.0; wvz = landed ? -b.v[3] : 0.0
     u = wvx*cos(θ) + wvz*sin(θ); vl = -wvx*sin(θ) + wvz*cos(θ)
     r = landed ? (b.R * b.ω)[2] : 0.0
-    og = objground_at(o[1], -o[3]); h = isfinite(og) ? og : groundz(o[1], -o[3])
+    og = objground_at(o[1], -o[3]); h = isfinite(og) ? og : groundz(o[1], -o[3]; hold = false)
     DriveRT3D.pin3d!(pc, o[1], -o[3], θ, h > -900 ? Float64(h) : o[2])
     pc.s_vel(pc.integ, [u, vl]); pc.v = hypot(u, vl)
     DriveRT3D._RSET3D[pc.sys][2](pc.integ, r)
@@ -3021,9 +3022,25 @@ end
 
 """The physics AI field (JM_AI_PHYSICS), one frame: plan, drive and step each AI Car3D, grass and solids, car-car
 contact; returns the field's poses. LOOPSPLIT-1 cycle 4 S2: moved unchanged."""
+
+function rai_hist_dump(i, AILINE)
+    i <= length(RAI_HIST) || return nothing
+    H = RAI_HIST[i]
+    for j in max(1, length(H) - 179):10:length(H)
+        h = H[j]; println("  [aiphys]    t-", rpad(round((length(H) - j)/60, digits = 2), 5), " s ", round(Int, h[1]), " lat ", round(h[2], digits = 1),
+                          " v ", round(Int, h[3]*3.6), " steer ", round(h[4], digits = 2), " thr ", round(h[5], digits = 2), " brk ", round(h[6], digits = 2),
+                          " r ", round(h[7], digits = 2), " tv ", round(Int, h[8]*3.6),
+                          " | kappa ", round(RaceAI.curv_at(AILINE, h[1]), digits = 4), " -> v_lim ", round(Int, 3.6*sqrt(AI_AMAX/max(abs(RaceAI.curv_at(AILINE, h[1])), 1e-5))),
+                          " (40 m on: ", round(Int, 3.6*sqrt(AI_AMAX/max(abs(RaceAI.curv_at(AILINE, h[1] + 40)), 1e-5))), ")")
+    end
+    empty!(H)
+    nothing
+end
+
 function aiphys_poses!(cs, ddt, ai_hit, AICARS, AILINE, AIPHYS, ai_onroad, ai_stuck, groundz_ai, aibankP, groundz)
 
     for (i, pc) in enumerate(AIPHYS)
+        i in RAI_GONE && continue
 
         prevs = AICARS[i].s
         s, lat = RaceAI.project(AILINE, pc.x, pc.z; hint = prevs)
@@ -3049,7 +3066,55 @@ function aiphys_poses!(cs, ddt, ai_hit, AICARS, AILINE, AIPHYS, ai_onroad, ai_st
         upset = RAI_UPSET_DEG > 0 && ((isfinite(pc.roll) && abs(pc.roll) > deg2rad(RAI_UPSET_DEG)) || (isfinite(pc.pitch) && abs(pc.pitch) > deg2rad(RAI_UPSET_DEG)) ||
                                       (isfinite(pc.y) && (g0_ = groundz_ai(pc.x, pc.z); g0_ > -900 && pc.y - g0_ > RAI_UPSET_H)))
         spun |= upset
+        upwhy = upset ? string(" roll ", round(rad2deg(pc.roll), digits = 1), " pitch ", round(rad2deg(pc.pitch), digits = 1), " deg, h ",
+                               (g1_ = groundz_ai(pc.x, pc.z); round(pc.y - g1_, digits = 2)), " m over groundz_ai; ground roll ", round(rad2deg(terrain_roll(pc)), digits = 1), " pitch ",
+                               round(rad2deg(terrain_pitch(pc)), digits = 1), " lat ", round(lat, digits = 1), "; wheel ground FL FR RL RR ",
+                               join((round(groundz_ai(pc.x + xi*cos(pc.θ) - yi*sin(pc.θ), pc.z + xi*sin(pc.θ) + yi*cos(pc.θ)) - g1_, digits = 2)
+                                     for (xi, yi) in ((1.314, 0.75), (1.314, -0.75), (-1.096, 0.75), (-1.096, -0.75))), " "),
+                               " m (vs the centre) at (", round(pc.x, digits = 1), ", ", round(pc.z, digits = 1), ")") : ""
         off = !(get(RAI_COOL, i, (:race, 0.0))[1] in (:pit, :stop, :parked)) && (pc.v < 1.4 || abs(lat) > 9.0 || offhat || spun)
+        if RAI_NOSNAP && !(get(RAI_COOL, i, (:race, 0.0))[1] in (:pit, :stop, :parked))
+            offhat || (RAI_OFFHAT[i] = 0)
+            prog = AICARS[i].lap*AILINE.total + s
+            pt = get(RAI_PROGT, i, (RAI_CLOCK[], prog))
+            prog > pt[2] + 10.0 && (pt = (RAI_CLOCK[], prog)); RAI_PROGT[i] = pt
+            if haskey(RAI_OUT, i)
+                off = false
+            elseif offhat && RAI_NOSNAP_UPSET && (RAI_OFFHAT[i] = get(RAI_OFFHAT, i, 0) + 1) > 6
+
+                RAI_OUT[i] = RAI_CLOCK[]; delete!(RAI_REC, i)
+                incident!(pc.x, pc.z, string("AI ", i, " crashed"))
+                println("  [airec] AI ", i, " retired at s ", round(Int, s), ": off the terrain (", round(pc.v*3.6), " km/h)"); flush(stdout)
+                off = false
+            elseif offhat && RAI_NOSNAP_UPSET
+                off = false
+            elseif upset && RAI_NOSNAP_UPSET
+                RAI_OUT[i] = RAI_CLOCK[]; delete!(RAI_REC, i)
+                incident!(pc.x, pc.z, string("AI ", i, " crashed"))
+                println("  [airec] AI ", i, " retired at s ", round(Int, s), ": overturned", upwhy, " (", round(pc.v*3.6), " km/h)"); flush(stdout)
+                off = false
+            elseif !(upset || offhat)
+                if (abs(lat) > 9.0 || spun) && !haskey(RAI_REC, i)
+                    RAI_REC[i] = RAI_CLOCK[]
+                    length(RAI_TLS) < i && append!(RAI_TLS, fill(NaN, i - length(RAI_TLS)))
+                    RAI_TLS[i] = lat - RaceAI.racelane(AILINE, s)
+                    incident!(pc.x, pc.z, string("AI ", i, spun ? " spun" : " off the road"))
+                    println("  [airec] AI ", i, " at s ", round(Int, s), ": ", spun ? "spun" : "off the road ($(round(lat, digits = 1)) m)",
+                            " (", round(pc.v*3.6), " km/h) -- drives back"); flush(stdout)
+                    RAI_SNAPDIAG && rai_hist_dump(i, AILINE)
+                elseif haskey(RAI_REC, i) && !spun && pc.v > 10.0 && abs(lat - RaceAI.racelane(AILINE, s)) < 2.0
+                    println("  [airec] AI ", i, " back on its line at s ", round(Int, s), " after ", round(RAI_CLOCK[] - RAI_REC[i], digits = 1), " s"); flush(stdout)
+                    delete!(RAI_REC, i)
+                end
+
+                if RAI_CLOCK[] - pt[1] > RAI_RETIRE_S && get(RAI_COOL, i, (:race, 0.0))[1] == :race
+                    RAI_OUT[i] = RAI_CLOCK[]; delete!(RAI_REC, i)
+                    incident!(pc.x, pc.z, string("AI ", i, " retired"))
+                    println("  [airec] AI ", i, " retired at s ", round(Int, s), " (no progress for ", RAI_RETIRE_S, " s)"); flush(stdout)
+                end
+                off = false
+            end
+        end
         if off
             ai_stuck[i] += 1
             lim = upset ? 0 : (offhat || abs(lat) > 12.0 || spun) ? 6 : (abs(lat) > 9.0 ? 18 : 90)
@@ -3065,19 +3130,9 @@ function aiphys_poses!(cs, ddt, ai_hit, AICARS, AILINE, AIPHYS, ai_onroad, ai_st
                 RAI_RESEAT ? DriveRT3D.reseat3d!(pc, rp[1], rp[3], rp[4]; v = vre, h = (g_ = groundz_ai(rp[1], rp[3]); g_ > -900 ? Float64(g_) : NaN)) :
                              AIplace!(pc, rp[1], rp[3], rp[4]; v = vre)
 
-                println("  [aiphys] snap AI ", i, " at s ", round(Int, s), ": ", offhat ? "off the terrain" : upset ? "upset" : spun ? "spun" :
+                println("  [aiphys] snap AI ", i, " at s ", round(Int, s), ": ", offhat ? "off the terrain" : upset ? "upset" * upwhy : spun ? "spun" :
                         abs(lat) > 9.0 ? "off the line ($(round(lat, digits = 1)) m)" : "stalled", " (", round(pc.v*3.6), " km/h)"); flush(stdout)
-                if RAI_SNAPDIAG && i <= length(RAI_HIST)
-                    H = RAI_HIST[i]
-                    for j in max(1, length(H) - 179):10:length(H)
-                        h = H[j]; println("  [aiphys]    t-", rpad(round((length(H) - j)/60, digits = 2), 5), " s ", round(Int, h[1]), " lat ", round(h[2], digits = 1),
-                                          " v ", round(Int, h[3]*3.6), " steer ", round(h[4], digits = 2), " thr ", round(h[5], digits = 2), " brk ", round(h[6], digits = 2),
-                                          " r ", round(h[7], digits = 2), " tv ", round(Int, h[8]*3.6),
-                                          " | kappa ", round(RaceAI.curv_at(AILINE, h[1]), digits = 4), " -> v_lim ", round(Int, 3.6*sqrt(AI_AMAX/max(abs(RaceAI.curv_at(AILINE, h[1])), 1e-5))),
-                                          " (40 m on: ", round(Int, 3.6*sqrt(AI_AMAX/max(abs(RaceAI.curv_at(AILINE, h[1] + 40)), 1e-5))), ")")
-                    end
-                    empty!(H)
-                end
+                RAI_SNAPDIAG && rai_hist_dump(i, AILINE)
             end
         else; ai_stuck[i] = 0; end
 
@@ -3086,7 +3141,7 @@ function aiphys_poses!(cs, ddt, ai_hit, AICARS, AILINE, AIPHYS, ai_onroad, ai_st
             RAI_RESTARTS[] <= 20 && (println("  [aiphys] AI ", i, " stalled at s ", round(Int, s), " (", round(pc.v*3.6), " km/h): engine restarted"); flush(stdout))
         end
         if RAI_HDIAG && isfinite(pc.y)
-            gz_ = groundz(pc.x, pc.z); hh = pc.y - gz_
+            gz_ = groundz(pc.x, pc.z; hold = false); hh = pc.y - gz_
             if gz_ > -900 && hh > 1.0 && RAI_CLOCK[] - get(RAI_HLAST, i, -Inf) > 1.0
                 RAI_HLAST[i] = RAI_CLOCK[]
                 println("  [aih] AI ", i, " t ", round(RAI_CLOCK[], digits = 1), " s ", round(Int, s), " ", round(hh, digits = 2), " m above the ground"); flush(stdout)
@@ -3136,6 +3191,7 @@ function aiphys_poses!(cs, ddt, ai_hit, AICARS, AILINE, AIPHYS, ai_onroad, ai_st
         RAI_DEC[k] += (max((RAI_VPREV[k] - vk)/max(ddt, 1e-3), 0.0) - RAI_DEC[k]) * min(1.0, ddt/0.2); RAI_VPREV[k] = vk
     end
     for (i, pc) in enumerate(AIPHYS)
+        i in RAI_GONE && continue
         if RAI_PROF_ON
 
             late = RAI_LATE > 1.0 && i <= length(RAI_PS) && RAI_PS[i].side != 0 && RAI_PS[i].passee >= 1 &&
@@ -3155,6 +3211,7 @@ function aiphys_poses!(cs, ddt, ai_hit, AICARS, AILINE, AIPHYS, ai_onroad, ai_st
         rc_ = get(RAI_COOL, i, nothing)
         rc_ !== nothing && rc_[1] === :cool && (vts[i] *= RAI_COOL_PACE)
 
+        (RAI_NOSNAP && haskey(RAI_REC, i) && !ai_onroad[i]) && (vts[i] = min(vts[i], RAI_OFFROAD_V))
         if RAI_LANE_RATE > 0
             length(RAI_TLS) < i && append!(RAI_TLS, fill(NaN, i - length(RAI_TLS)))
             tl0 = RAI_TLS[i]; tlw = AICARS[i].tlane
@@ -3165,6 +3222,14 @@ function aiphys_poses!(cs, ddt, ai_hit, AICARS, AILINE, AIPHYS, ai_onroad, ai_st
                                          holdwall = RAI_YIELD && any(ps -> ps.side != 0 && ps.passee == i, RAI_PS))
 
         rc_ !== nothing && ((thr, brk, st) = rai_cool_drive!(i, pc, rc_, thr, brk, st))
+        if haskey(RAI_OUT, i)
+            thr = 0.0; brk = 1.0; st = 0.0
+            if RAI_CLOCK[] - RAI_OUT[i] > RAI_REMOVE_S
+                push!(RAI_GONE, i); AIplace!(pc, pc.x + 2.0e4, pc.z + 2.0e4, pc.θ; v = 0.0); AICARS[i].lane = 1.0e3
+                println("  [airec] AI ", i, " removed from the track"); flush(stdout)
+                continue
+            end
+        end
         if RAI_TC && thr > 0
             tl = DriveRT3D.telemetry3d(pc); u = max(tl.u, 3.0)
             slip = (max(tl.ωRL, tl.ωRR)*DriveRT3D.RW_R - u)/u
@@ -3175,7 +3240,29 @@ function aiphys_poses!(cs, ddt, ai_hit, AICARS, AILINE, AIPHYS, ai_onroad, ai_st
             length(RAI_HIST) < i && push!(RAI_HIST, NTuple{8,Float64}[])
             H = RAI_HIST[i]; push!(H, (AICARS[i].s, AICARS[i].lane, pc.v, st, thr, brk, AIyaw(pc), vts[i])); length(H) > 200 && popfirst!(H)
         end
-        _tas = time(); DriveRT3D.step_car3d!(pc, thr, brk, st, ddt; manual=false, groundz=groundz_ai); DS_SIM[2] += time() - _tas
+        if AISTEP_DIAG
+            _ab = Base.gc_bytes(); _an = time_ns()
+            DriveRT3D.step_car3d!(pc, thr, brk, st, ddt; manual=false, groundz=groundz_ai)
+            AISTEP_ACC[1] += time_ns() - _an; AISTEP_ACC[2] += Base.gc_bytes() - _ab; AISTEP_ACC[3] += 1
+            if AISTEP_ACC[3] >= 3000
+                println("  [aistep] ", round(AISTEP_ACC[1]/AISTEP_ACC[3]/1000, digits = 1), " us and ", round(Int, AISTEP_ACC[2]/AISTEP_ACC[3]),
+                        " bytes allocated per AI car-step (", AISTEP_ACC[3], " steps)"); flush(stdout)
+                fill!(AISTEP_ACC, 0.0)
+            end
+        else
+            _tas = time(); DriveRT3D.step_car3d!(pc, thr, brk, st, ddt; manual=false, groundz=groundz_ai); DS_SIM[2] += time() - _tas
+        end
+        if RAI_CLASSICWALL && CLASSICW_PHYS && !(get(RAI_COOL, i, (:race, 0.0))[1] in (:pit, :stop, :parked))
+            dvw = ai_classicwall_clamp!(i, pc)
+            if dvw > 1.0 && RAI_CLOCK[] - get(RAI_WALLT, i, -Inf) > 1.0
+                RAI_WALLT[i] = RAI_CLOCK[]
+                println("  [aiwall] AI ", i, " hit a Classic wall at s ", round(Int, AICARS[i].s), " (", round(Int, pc.v*3.6), " km/h, lost ",
+                        round(dvw, digits = 1), " m/s); Classic lat ", round(RAI_CLASSICW_LASTG[][1], digits = 2), " free ", round(RAI_CLASSICW_LASTG[][2], digits = 2),
+                        "..", round(RAI_CLASSICW_LASTG[][3], digits = 2), " gaps lo/hi/end ", round(RAI_CLASSICW_LASTG[][4], digits = 2), " ", round(RAI_CLASSICW_LASTG[][5], digits = 2),
+                        " ", round(RAI_CLASSICW_LASTG[][6], digits = 2), " at (", round(pc.x, digits = 1), ", ", round(pc.z, digits = 1), ") lane ",
+                        round(AICARS[i].lane, digits = 2)); flush(stdout)
+            end
+        end
 
         hs = JRTrack.hat(TRKSURF, pc.x, pc.z)
         ai_onroad[i] = !(hs.found && abs(hs.lateral) > ROAD_HALFW)
@@ -3232,7 +3319,7 @@ function aiphys_poses!(cs, ddt, ai_hit, AICARS, AILINE, AIPHYS, ai_onroad, ai_st
         AIbump!(pa, -imp*nx, -imp*nz, clamp(-imp*0.04, -0.6, 0.6))
         AIbump!(pb,  imp*nx,  imp*nz, clamp( imp*0.04, -0.6, 0.6))
     end
-    [(b=aibankP(pc); (pc.x, isfinite(pc.y) ? pc.y : groundz(pc.x, pc.z), pc.z, pc.θ, b[1], b[2])) for pc in AIPHYS]
+    [(b=aibankP(pc); (pc.x, isfinite(pc.y) ? pc.y : groundz(pc.x, pc.z; hold = false), pc.z, pc.θ, b[1], b[2])) for pc in AIPHYS]
 end
 
 function track_position_step!(cs, dt, rst, race_go, player_prog, player_s_prev, ffb_jolt, groundz_phys,

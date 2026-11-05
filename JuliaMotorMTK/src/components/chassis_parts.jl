@@ -86,7 +86,8 @@ the two through the stiffness `c_c` (N·m per rad/s); slipping, it transmits its
 function Clutch(; name, c_c = 60.0)
     ps = @parameters c_c=c_c
     vars = @variables engage(t) slip(t) cap(t) T(t)
-    System([cap ~ clutch_capacity(engage), T ~ clamp(c_c*slip, -cap, cap)], t, vars, ps; name)
+
+    System([cap ~ clutch_capacity(engage), T ~ max(-cap, min(c_c*slip, cap))], t, vars, ps; name)
 end
 
 """Tyre relaxation (CARPHYS-1 S11): a tyre does not make its lateral force from the kinematic slip angle at once -- the

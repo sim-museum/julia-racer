@@ -25,6 +25,16 @@ using PrecompileTools
         for i in 1:30; DriveRT3D.step_car3d!(cs, 0.6, 0.0, 0.05, 1/60; manual = false, groundz = flat); end
         DriveRT3D.telemetry3d(cs)
         DriveRT3D.set_chassis!(DriveRT3D.Chassis())
+
+        ledge(x, z) = x > 9.0 ? -1.2 : (x > 4.0 ? 0.25 : 0.0)
+        h = DriveRT3D.build_car3d(x0 = 0.0, z0 = 0.0, θ0 = 0.0, v0 = 20.0, y0 = 0.0)
+        for i in 1:40; DriveRT3D.step_car3d!(h, 0.3, 0.0, 0.0, 1/60; manual = false, groundz = ledge); end
+        DriveRT3D.bump3d!(h, 2.0, 3.0, 1.5, 4.0, 3.0, 1.0)
+        DriveRT3D.extforce3d!(h; Fx = -4.0e4, Fy = 2.0e4, Mz = 1.0e4)
+        for i in 1:20; DriveRT3D.step_car3d!(h, 0.0, 1.0, 0.3, 1/60; manual = false, groundz = flat); end
+        DriveRT3D.extforce3d!(h)
+        for i in 1:20; DriveRT3D.step_car3d!(h, 0.0, 1.0, 0.0, 1/60; manual = true, groundz = flat); end
+        DriveRT3D.damage_reset!()
     end
 end
 end

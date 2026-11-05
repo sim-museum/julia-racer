@@ -383,7 +383,7 @@ const AI_TRAIL = get(ENV, "JM_AI_TRAIL", "1") != "0"
 const PP_WHEELBASE = 2.41; const PP_MAXSTEER = 0.30
 
 const PP_LA_T = parse(Float64, get(ENV, "JM_RAI_LA_T", "0.55"))
-const PP_YAWK = parse(Float64, get(ENV, "JM_RAI_YAWK", "0.06"))
+const PP_YAWK = parse(Float64, get(ENV, "JM_RAI_YAWK", "0.30"))
 const SPIN_LO  = parse(Float64, get(ENV, "JM_AI_SPIN_LO", "1.0"))
 const SPIN_HI  = parse(Float64, get(ENV, "JM_AI_SPIN_HI", "3.0"))
 const CAR_LEN  = 4.2
