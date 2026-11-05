@@ -336,16 +336,22 @@ end
 const BAND_EVT_TESTED = Ref(false)
 const BAND_OV = Float32[]; const BAND_OT = Float32[]
 
-"A race lap begins as you cross the line: the last lap -> the flag, any other -> the leaderboard."
+"""A race lap begins as you cross the line: the last lap -> the white flag (`:flag`), any other -> the leaderboard; the
+finish -> the chequered flag (`:finish`)."""
 function band_events_step!(cs, race_go, race_done)
     if BAND_LAPS[] < 0 || !race_go[]
         BAND_LAPS[] = cs.laps
     elseif cs.laps > BAND_LAPS[]
         BAND_LAPS[] = cs.laps
-        if IS_RACE && !race_done
+        if IS_RACE
             nxt = cs.laps + 1
-            nxt == RACE_LAPS ? (BAND_EVT[] = (:flag, cs.t)) : nxt < RACE_LAPS && (BAND_EVT[] = (:board, cs.t))
-            BAND_EVT[][1] === :none || (println("  [hudband] ", BAND_EVT[][1], " at t=", round(cs.t, digits = 2), " (lap ", nxt, " of ", RACE_LAPS, ")"); flush(stdout))
+            if cs.laps == RACE_LAPS
+                BAND_EVT[] = (:finish, cs.t)
+            elseif !race_done
+                nxt == RACE_LAPS ? (BAND_EVT[] = (:flag, cs.t)) : nxt < RACE_LAPS && (BAND_EVT[] = (:board, cs.t))
+            end
+            BAND_EVT[][1] === :none || BAND_EVT[][2] != cs.t ||
+                (println("  [hudband] ", BAND_EVT[][1], " at t=", round(cs.t, digits = 2), " (lap ", min(nxt, RACE_LAPS), " of ", RACE_LAPS, ")"); flush(stdout))
         end
     end
     if BAND_EVT_TEST !== nothing && !BAND_EVT_TESTED[] && cs.t >= BAND_EVT_TEST[1]
@@ -355,21 +361,40 @@ function band_events_step!(cs, race_go, race_done)
     nothing
 end
 
-"""Over the 3D view: the chequered flag (middle left) or Classic's leaderboard (top left: laps to go, your position, the
-order), while the event is fresh."""
+const FLAG_V = Float32[]
+"Draw flag `kind` (:yellow, :white, :chequer or :meatball) middle left of the 3D view, its cloth waving at sim time `t`."
+function flag_draw!(kind::Symbol, t::Float64, W, H)
+    v = empty!(FLAG_V)
+    fw = round(0.11W); fh = round(0.62fw); fx = round(0.05W); fy = band_px() + round(0.45view_h() - fh/2)
+    Render.hquad!(v, fx - 10, fy - 6, 6, fh*2.2, (0.55, 0.45, 0.30))
+    nx = kind === :chequer ? 6 : kind === :meatball ? 24 : 8; ny = kind === :chequer ? 4 : 1; sw = fw/nx; sh = fh/ny
+    for i in 0:nx-1
+        ph = 2π*(1.6t - i/nx); dy = 0.05fh*sin(ph)*(i/nx); sd = 0.96 + 0.04*cos(ph)
+        for j in 0:ny-1
+            c = kind === :yellow ? (0.98sd, 0.84sd, 0.08) : kind === :meatball ? (0.05, 0.05, 0.05) :
+                (kind === :white || iseven(i + j)) ? (sd, sd, sd) : (0.06, 0.06, 0.06)
+            Render.hquad!(v, fx + i*sw, fy + j*sh + dy, sw + 1, sh, c)
+        end
+        if kind === :meatball
+            r = 0.30fh; dxc = fx + (i + 0.5)*sw - (fx + fw/2)
+            abs(dxc) < r && (hh = sqrt(r^2 - dxc^2); Render.hquad!(v, fx + i*sw, fy + fh/2 - hh + dy, sw + 1, 2hh, (1.0sd, 0.45sd, 0.05)))
+        end
+    end
+    Render.hud_draw(hudprog, hudvao, hudvbo, v, W, H)
+    nothing
+end
+band_evt_secs(what) = what === :finish ? max(BAND_EVT_SECS, 10.0) : BAND_EVT_SECS
+"The white or chequered flag is showing now (the yellow waits under it)."
+band_flag_shown(t) = (e = BAND_EVT[]; (e[1] === :flag || e[1] === :finish) && 0.0 <= t - e[2] <= band_evt_secs(e[1]))
+
+"""Over the 3D view: the white flag (last lap) or the chequered flag (finish), middle left, or Classic's leaderboard (top left:
+laps to go, your position, the order), while the event is fresh."""
 function band_overlay_draw!(cs, W, H, AICARS, standings, texthud_name)
     (what, t0) = BAND_EVT[]
-    (what === :none || cs.t - t0 > BAND_EVT_SECS || cs.t < t0) && return nothing
+    (what === :none || cs.t - t0 > band_evt_secs(what) || cs.t < t0) && return nothing
     v = empty!(BAND_OV)
-    if what === :flag
-        fw = round(0.11W); fh = round(0.62fw); fx = round(0.05W); fy = band_px() + round(0.45view_h() - fh/2)
-        Render.hquad!(v, fx - 10, fy - 6, 6, fh*2.2, (0.55, 0.45, 0.30))
-        Render.hquad!(v, fx - 4, fy - 4, fw + 8, fh + 8, (0.08, 0.08, 0.08))
-        nx, ny = 6, 4; sw = fw/nx; sh = fh/ny
-        for i in 0:nx-1, j in 0:ny-1
-            Render.hquad!(v, fx + i*sw, fy + j*sh, sw, sh, iseven(i + j) ? (0.97, 0.97, 0.97) : (0.06, 0.06, 0.06))
-        end
-        Render.hud_draw(hudprog, hudvao, hudvbo, v, W, H)
+    if what === :flag || what === :finish
+        flag_draw!(what === :flag ? :white : :chequer, Float64(cs.t), W, H)
     elseif what === :board && FONT !== nothing
         st = (IS_RACE && !isempty(AICARS)) ? standings() : Tuple{Int,Float64}[(0, 0.0)]
         me = something(findfirst(e -> e[1] == 0, st), 1)

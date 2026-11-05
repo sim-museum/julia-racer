@@ -39,6 +39,9 @@ def tyre_hints(imo, work=60.0):
         out.append("edges hot: too little pressure -- raise it")
     if i - o > 10:
         out.append("inner much hotter: too much negative camber -- reduce it")
+    elif o - i > 6:
+
+        out.append("outer much hotter: mostly cornering load (camber moves the spread ~5 C at most here) -- add some negative camber to even it a little")
     elif o - i > 3:
         out.append("outer hotter: too little negative camber -- add some")
     return out or ["even: no change suggested"]

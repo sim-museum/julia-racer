@@ -16,7 +16,10 @@ export Car3D, build_car3d, air_density, set_air!, Chassis, CHASSIS, set_chassis!
 const GEARS = [2.23, 1.72, 1.32, 1.09, 0.916]
 
 const REVERSE_ON = get(ENV, "JM_REVERSE", "1") != "0"
-gearratio(g::Int) = g == -1 ? -GEARS[1] : g <= 0 ? 0.0 : GEARS[g]
+
+const REVERSE_RATIO = 4.00
+const REVERSE_VMAX  = 2.0
+gearratio(g::Int) = g == -1 ? -REVERSE_RATIO : g <= 0 ? 0.0 : GEARS[g]
 const FINAL = Ref(4.11)
 const TRANS_SRC = Ref("built-in fallback (SKIDPAD setup -- NOT from an ibt)")
 
@@ -546,6 +549,8 @@ set_air!(c, ρ) = ModelingToolkit.setp(c.sys, c.sys.ρair)(c.integ, ρ)
 
 function build_car3d(; x0 = 0.0, z0 = 0.0, θ0 = 0.0, v0 = 0.0, y0 = 0.0,
                      brush = !haskey(ENV, "JM_MAGIC"), dt = 1/300)
+    SLOPE_G[] = get(ENV, "JM_SLOPE_GRAVITY", "1") != "0"
+    SLOPE_DIAG[] = parse(Float64, get(ENV, "JM_SLOPE_DIAG", "0"))
     _cp = CAR[]; _car = _cp.name == "Lotus" ? NamedTuple() : (tf = 1.5 + _cp.dtf, tr = 1.5 + _cp.dtr, iscale = car_iscale())
     sys = mtkcompile(DrivenVehicle3D(name = :car, brush = brush, final = final_eff(), m = car_mass(), front_frac = FRONT_FRAC[],
                     fl_corner = _corner(:f, KS[][1]; i = 1), fr_corner = _corner(:f, KS[][2]; i = 2),
@@ -588,6 +593,8 @@ function build_cars3d(poses; brush = !haskey(ENV, "JM_MAGIC"), dt = 1/300)
     with_lotus(() -> _build_cars3d(poses; brush, dt))
 end
 function _build_cars3d(poses; brush = !haskey(ENV, "JM_MAGIC"), dt = 1/300)
+    SLOPE_G[] = get(ENV, "JM_SLOPE_GRAVITY", "1") != "0"
+    SLOPE_DIAG[] = parse(Float64, get(ENV, "JM_SLOPE_DIAG", "0"))
     sys = mtkcompile(DrivenVehicle3D(name = :car, brush = brush, final = FINAL[], m = MASS[], front_frac = FRONT_FRAC[],
                     fl_corner = _corner(:f, KS[][1]; i = 1), fr_corner = _corner(:f, KS[][2]; i = 2),
                     rl_corner = _corner(:r, KS[][3]; i = 3), rr_corner = _corner(:r, KS[][4]; i = 4),
@@ -627,6 +634,32 @@ end
 
 const VFRAME_INERTIAL = lowercase(get(ENV, "JM_VFRAME", "inertial")) != "legacy"
 const _VREF = IdDict{Any,Float64}()
+
+const SLOPE_G = Ref(true)
+const SLOPE_TAU = 0.05
+const _GSET = IdDict{Any,Any}()
+const _GSL = IdDict{Any,NTuple{2,Float64}}()
+function _slope_gravity!(c, terr, grounded, subdt)
+    sx, sy = 0.0, 0.0
+    if SLOPE_G[] && grounded && all(isfinite, terr)
+        gx = ((terr[1] + terr[2]) - (terr[3] + terr[4])) / (2*(WHEELS[1][1] - WHEELS[3][1]))
+        gy = ((terr[1] + terr[3]) - (terr[2] + terr[4])) / (2*(WHEELS[1][2] - WHEELS[2][2]))
+        gx = clamp(gx, -0.35, 0.35); gy = clamp(gy, -0.35, 0.35)
+        sx = gx/sqrt(1 + gx^2 + gy^2); sy = gy/sqrt(1 + gx^2 + gy^2)
+    end
+    p = get(_GSL, c, (sx, sy)); α = min(1.0, subdt/SLOPE_TAU)
+    q = (p[1] + α*(sx - p[1]), p[2] + α*(sy - p[2])); _GSL[c] = q
+    st = get!(() -> (ModelingToolkit.setp(c.sys, c.sys.sgx), ModelingToolkit.setp(c.sys, c.sys.sgy)), _GSET, c.sys)
+    st[1](c.integ, q[1]); st[2](c.integ, q[2])
+    if SLOPE_DIAG[] > 0 && c.t >= get(_GSLT, c, -Inf) + SLOPE_DIAG[]
+        _GSLT[c] = c.t
+        println("  [slope] t ", round(c.t; digits = 2), " s ", round(c.lapdist; digits = 1), " v ", round(c.v; digits = 1),
+                " sgx ", round(q[1]; digits = 4), " sgy ", round(q[2]; digits = 4))
+    end
+    q
+end
+const SLOPE_DIAG = Ref(0.0)
+const _GSLT = IdDict{Any,Float64}()
 const _VSTATE = IdDict{Any,Any}()
 _vstate(c) = get!(_VSTATE, c.sys) do
     vs = [c.sys.w, c.sys.wFL.vu, c.sys.wFR.vu, c.sys.wRL.vu, c.sys.wRR.vu]
@@ -640,10 +673,10 @@ function step_car3d!(c::Car3D, throttle, brake, steer, dt;
     if manual
         c.s_clu(c.integ, clamp(clutch, 0, 1))
         up && c.gear < 5 && (c.gear += 1; c.s_gr(c.integ, gearratio(c.gear)))
-        dn && (c.gear > 0 || (REVERSE_ON && c.gear == 0 && abs(c.v) < 1.0)) && (c.gear -= 1; c.s_gr(c.integ, gearratio(c.gear)))
+        dn && (c.gear > 0 || (REVERSE_ON && c.gear == 0 && abs(c.v) < REVERSE_VMAX)) && (c.gear -= 1; c.s_gr(c.integ, gearratio(c.gear)))
     else
 
-        if REVERSE_ON && dn && abs(c.v) < 1.0 && 0 <= c.gear <= 1
+        if REVERSE_ON && dn && abs(c.v) < REVERSE_VMAX && 0 <= c.gear <= 1
             c.gear = -1; c.s_gr(c.integ, gearratio(-1))
         elseif up && c.gear == -1
             c.gear = 0
@@ -700,6 +733,7 @@ function step_car3d!(c::Car3D, throttle, brake, steer, dt;
         ΣFz = a[19] + a[20] + a[21] + a[22]
         grounded = ΣFz > 0.15 * 617 * 9.80665
         grounded_last = grounded; c.grounded = grounded
+        _slope_gravity!(c, terr, grounded, subdt)
         vr_cg = (vr[1]+vr[2]+vr[3]+vr[4])/4
 
         if VFRAME_INERTIAL
@@ -822,6 +856,23 @@ function rimtorque3d(c::Car3D)
         try ModelingToolkit.getsym(c.sys, c.sys.col.τ) catch; nothing end
     end
     g === nothing ? nothing : g(c.integ)
+end
+
+const _SHK3D = IdDict{Any,Any}()
+"""DATAMINE-1: each corner's suspension compression at the SHOCK [m], FL FR RL RR, as reference's ??shockDefl (wheel up
+relative to its body mount x the motion ratio, MR2 / MR2_R; 0 = the model's rest, where reference's carries its static
+offset -- differences and roll compare, absolute values do not). `nothing` on a model without the corner masses."""
+function shockdefl3d(c::Car3D)
+    g = get!(_SHK3D, c.sys) do
+        s = c.sys
+        try (ModelingToolkit.getsym(s, [s.z, s.th, s.ph, s.wFL.zu, s.wFR.zu, s.wRL.zu, s.wRR.zu]),
+             ModelingToolkit.getp(s, s.a)(c.integ), ModelingToolkit.getp(s, s.b)(c.integ)) catch; nothing end
+    end
+    g === nothing && return nothing
+    (z, th, ph, fl, fr, rl, rr) = g[1](c.integ); a = g[2]; b = g[3]
+    cmp(zu, xi, yi) = zu - (z + xi*th + yi*ph)
+    mf = sqrt(MR2); mr = sqrt(MR2_R)
+    (cmp(fl, a, 0.75)*mf, cmp(fr, a, -0.75)*mf, cmp(rl, -b, 0.75)*mr, cmp(rr, -b, -0.75)*mr)
 end
 
 const _GRIP3D = IdDict{Any,Any}()
@@ -984,6 +1035,23 @@ function wheelmu3d!(c::Car3D, μFL, μFR, μRL, μRR)
     c
 end
 
+const _MUX3D = IdDict()
+function wheelmux3d!(c::Car3D, k::Float64)
+    e = get!(_MUX3D, c.integ) do
+        try
+            ps = (c.sys.FL.μx, c.sys.FR.μx, c.sys.RL.μx, c.sys.RR.μx)
+            (map(p -> setp(c.sys, p), ps), map(p -> Float64(ModelingToolkit.SymbolicIndexingInterface.getp(c.sys, p)(c.integ)), ps), Ref(1.0))
+        catch err
+            @warn "wheelmux3d!: no per-wheel μx on this tyre model; the wet longitudinal factor is off" err
+            nothing
+        end
+    end
+    (e === nothing || e[3][] == k) && return c
+    for i in 1:4; e[1][i](c.integ, e[2][i]*k); end
+    e[3][] = k
+    c
+end
+
 const _RSET3D = IdDict()
 function yawrate3d(c::Car3D)
     gs = get!(() -> (ModelingToolkit.getsym(c.sys, c.sys.r), ModelingToolkit.setu(c.sys, c.sys.r)), _RSET3D, c.sys)
@@ -1001,6 +1069,12 @@ function place3d!(c::Car3D, x, z, θ; v = 0.0)
     c.x = x; c.z = z; c.θ = θ; c.v = v
     c
 end
+"""TD261104-1: restart a stalled engine at its 2,000 rpm idle (an AI driver's restart; the player's stall rule is E98)."""
+function restart_engine!(c::Car3D)
+    c.s_we(c.integ, 209.4); c.rpm = 2000.0
+    OrdinaryDiffEq.SciMLBase.u_modified!(c.integ, true)
+    c
+end
 """HEDGEJOLT-1 (PO 2026-10-18: "when the car ran into a hedge, there was levitating and fibrilating"): a frozen wreck was
 re-placed every frame with `place3d!` -- position, heading, speed -- but its yaw rate and vertical states ran on: a corner
 the impact left 1.1 m down drove the body up and down 0.2 m and the nose +-7 deg between placements, for as long as the
@@ -1016,7 +1090,31 @@ function pin3d!(c::Car3D, x, z, θ, h)
     OrdinaryDiffEq.SciMLBase.u_modified!(c.integ, true)
     c
 end
+"""AISTYLE-1 S4: re-seat a car on the road at speed `v` as if it had been driving there -- `place3d!` moves it and sets
+its speed but KEPT its yaw rate, wheel speeds and suspension states, so a spun AI car snapped back onto its line at 8 m/s
+was still rotating with its rear wheels spinning and spun again at once (Zandvoort baseline: 30 of 58 spins at exactly the
+re-seat speed, chains 13 m apart). Yaw rate 0, every wheel rolling at `v`, the vertical subsystem at rest, on ground `h`."""
+function reseat3d!(c::Car3D, x, z, θ; v = 0.0, h = NaN)
+    place3d!(c, x, z, θ; v = v)
+    gs = get!(() -> (ModelingToolkit.getsym(c.sys, c.sys.r), ModelingToolkit.setu(c.sys, c.sys.r)), _RSET3D, c.sys)
+    gs[2](c.integ, 0.0)
+
+    ws = get!(_WSPIN3D, c.sys) do
+        syms = Any[c.sys.ωf]; append!(syms, first.(_wheel_u0(c.sys, 0.0)))
+        (ModelingToolkit.setu(c.sys, syms), length(syms))
+    end
+    ws[1](c.integ, [v/0.30; fill(v/RW_R, ws[2] - 1)])
+
+    c.s_we(c.integ, clamp(abs(v)/RW_R*abs(gearratio(c.gear))*FINAL[], 209.4, 942.0))
+    c.s_vreset(c.integ, zeros(14)); delete!(_VREF, c); delete!(_GSL, c)
+    c.heave = 0.0; c.pitch = 0.0; c.roll = 0.0; c.vacc = 9.80665
+    isfinite(h) && (c.zref = Float64(h); c.y = c.zref)
+    c.zr_prev = ntuple(_ -> 0.0, 4)
+    OrdinaryDiffEq.SciMLBase.u_modified!(c.integ, true)
+    c
+end
 const _WSET3D = IdDict()
+const _WSPIN3D = IdDict()
 const _PPSET3D = IdDict()
 const _QSET3D = IdDict()
 """

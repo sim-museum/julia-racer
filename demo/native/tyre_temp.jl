@@ -3,8 +3,9 @@
 const TT_GRIP   = get(ENV, "JM_TYRETEMP", "1") != "0"
 const TT_AIR    = 25.6
 const TT_TRACK  = 39.8
-const TT_WORK   = parse(Float64, get(ENV, "JM_TYRETEMP_WORK", "45"))
-const TT_COLD   = parse(Float64, get(ENV, "JM_TYRETEMP_COLD", "0.036"))
+
+const TT_WORK   = parse(Float64, get(ENV, "JM_TYRETEMP_WORK", "54"))
+const TT_COLD   = parse(Float64, get(ENV, "JM_TYRETEMP_COLD", "0.19"))
 const TT_CEXP   = parse(Float64, get(ENV, "JM_TYRETEMP_CEXP", "1.0"))
 const TT_HOT    = 100.0
 const TT_T0     = let e = get(ENV, "JM_TYRE_T0", "")
@@ -14,11 +15,15 @@ end
 const TT_S0 = 0.004
 const TT_S1 = parse(Float64, get(ENV, "JM_TT_S1", "0.035"))
 const TT_SN = parse(Float64, get(ENV, "JM_TT_SN", "3"))
-const TT_GS = parse(Float64, get(ENV, "JM_TT_GS", "30"))
+const TT_GS = parse(Float64, get(ENV, "JM_TT_GS", "3"))
 
 const TT_FRONT = parse(Float64, get(ENV, "JM_TT_FRONT", "2.5"))
-const TT_KIN  = 0.020
+
+const TT_KIN  = 0.010
 const TT_KOUT = 0.005
+const TT_KH   = 0.006
+const TT_KHF  = 2.5
+const TT_CS   = 0.65
 
 const TT_WEAR_KF = parse(Float64, get(ENV, "JM_TT_WEAR_KF", "1.54e-4"))
 const TT_WEAR_KR = parse(Float64, get(ENV, "JM_TT_WEAR_KR", "5.2e-5"))
@@ -40,10 +45,11 @@ const AD_TT_EXP = parse(Float64, get(ENV, "JM_AD_TT_EXP", "2.0"))
 
 tt_reset!(T0 = TT_T0) = (fill!(TT_SURF, T0); fill!(TT_CARC, T0); fill!(TT_MU, 1.0); fill!(TT_WEAR, 1.0); TT_DIST[] = 0.0; nothing)
 
-"Grip factor for a mean carcass temperature (1.0 warm; cold and overheated less)."
-function tt_mu(Tc::Float64)
+const TT_WET_COLD = get(ENV, "JM_TT_WET_COLD", "0") != "0"
+"Grip factor for a mean carcass temperature (1.0 warm; cold and overheated less). `wet` > 1: no cold loss (TD261104-3)."
+function tt_mu(Tc::Float64, wet::Int = 1)
     TT_GRIP || return 1.0
-    c = clamp((TT_WORK - Tc)/(TT_WORK - TT_TRACK), 0.0, 1.0)
+    c = (wet > 1 && !TT_WET_COLD) ? 0.0 : clamp((TT_WORK - Tc)/(TT_WORK - TT_TRACK), 0.0, 1.0)
     h = max(0.0, Tc - TT_HOT)/50
     clamp(1.0 - TT_COLD*c^TT_CEXP - 0.05*h, 0.6, 1.0)
 end
@@ -76,12 +82,12 @@ function tt_step!(tc, v::Float64, dt::Float64, wet::Int)
         for z in 1:3
             TT_WEAR[i, z] = max(0.0, TT_WEAR[i, z] - (i <= 2 ? TT_WEAR_KF : TT_WEAR_KR)*3*w[z]*P*dt)
             Tc = TT_CARC[i, z]
-            Ts_eq = Tc - 0.25*min(av/30, 1.0)*(Tc - TT_AIR)*cool + TT_GS*3*w[z]*P/cool
+            Ts_eq = Tc - TT_CS*min(av/30, 1.0)*(Tc - TT_AIR)*cool + TT_GS*3*w[z]*P/cool
             TT_SURF[i, z] += (Ts_eq - TT_SURF[i, z]) * min(1.0, dt/0.8)
-            TT_CARC[i, z] += dt*(TT_KIN*(TT_SURF[i, z] - Tc) - TT_KOUT*cool*(1 + av/30)*(Tc - tamb))
+            TT_CARC[i, z] += dt*(TT_KIN*(TT_SURF[i, z] - Tc) + TT_KH*(i <= 2 ? TT_KHF : 1.0)*F*av/1000 - TT_KOUT*cool*(1 + av/30)*(Tc - tamb))
             mc += TT_CARC[i, z]/3
         end
-        TT_MU[i] = tt_mu(mc)
+        TT_MU[i] = tt_mu(mc, wet)
     end
     nothing
 end

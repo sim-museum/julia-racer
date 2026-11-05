@@ -4,6 +4,7 @@ const WHEEL_HITS = get(ENV, "JM_WHEEL_HITS", "1") != "0"
 const WHEEL_M = 20.0
 const WHEEL_E = 0.3
 const WHEEL_R = 0.33
+const WHEEL_UPMAX = 4.0
 const CAR_HL = 1.95; const CAR_HW = 0.85
 
 """Car (x, z, heading θ, world velocity (vx, vz), mass mc) against wheel w (game frame). Returns nothing, or (the wheel
@@ -18,7 +19,8 @@ function wheel_hit(x, z, θ, vx, vz, mc, w::LooseWheel)
     vc > 0.5 || return nothing
     J = (1 + WHEEL_E)*vc/(1/WHEEL_M + 1/mc)
     under = clamp(1 - max(abs(f)/CAR_HL, abs(l)/CAR_HW), 0.0, 1.0)
-    w2 = (wx + 0.05nx, wy, wz + 0.05nz, wvx + J/WHEEL_M*nx, max(wvy, 0.0) + 0.25*J/WHEEL_M, wvz + J/WHEEL_M*nz, sp, sr + vc/WHEEL_R, nm)
+
+    w2 = (wx + 0.05nx, wy, wz + 0.05nz, wvx + J/WHEEL_M*nx, max(wvy, 0.0) + min(0.10*J/WHEEL_M, WHEEL_UPMAX), wvz + J/WHEEL_M*nz, sp, sr + vc/WHEEL_R, nm)
     (w2, (-J/mc*nx, -J/mc*nz), under, vc)
 end
 
@@ -57,10 +59,18 @@ end
 
 const WHEEL_DROP = (f = split(get(ENV, "JM_WHEEL_DROP", ""), ":"); length(f) == 2 && haskey(ENV, "JM_SMOKE") ? (parse(Float64, f[1]), parse(Float64, f[2])) : nothing)
 const WHEEL_DROP_DONE = Ref(false)
+const WHEEL_DROP_PREV = Ref((NaN, 0.0, 0.0, 0.0))
 function wheel_drop_step!(t, ai_poses, groundz)
-    (WHEEL_DROP === nothing || WHEEL_DROP_DONE[] || t < WHEEL_DROP[1] || isempty(ai_poses)) && return nothing
+    (WHEEL_DROP === nothing || WHEEL_DROP_DONE[] || isempty(ai_poses)) && return nothing
+    p = ai_poses[1]
+    if t < WHEEL_DROP[1]
+        WHEEL_DROP_PREV[] = (t, p[1], p[3], p[4]); return nothing
+    end
     WHEEL_DROP_DONE[] = true
-    p = ai_poses[1]; x = p[1] + WHEEL_DROP[2]*cos(p[4]); z = p[3] + WHEEL_DROP[2]*sin(p[4])
+
+    (t0, x0, z0, h0) = WHEEL_DROP_PREV[]
+    dd = hypot(p[1] - x0, p[3] - z0); dir = (isnan(t0) || dd < 1e-3) ? p[4] : atan(p[3] - z0, p[1] - x0)
+    x = p[1] + WHEEL_DROP[2]*cos(dir); z = p[3] + WHEEL_DROP[2]*sin(dir)
     h = groundz(x, z); y = (h > -900 ? Float64(h) : Float64(p[2])) + WHEEL_R
     nm = isempty(AICARMODELS) ? "wheel" : String((AICARMODELS[1]::Render.CLASSICCarModel).wheelspec[1][5])
     push!(AI_LOOSE_WHEELS, (x, y, z, 0.0, 0.0, 0.0, 0.0, 0.0, nm)); push!(AI_LOOSE_OWNER, 1)

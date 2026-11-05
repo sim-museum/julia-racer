@@ -689,11 +689,18 @@ function advance!(T::Track, c::Car, m_follow, scale, vcap_rel)
     c.pose = _pose(T, c)
     nothing
 end
+const LIFTDIAG = get(ENV, "JM_AI_LIFTDIAG", "0") == "1"
+const LIFTDIAG_N = Base.Ref(0)
+const ROLLSPLIT = get(ENV, "JM_AI_ROLLSPLIT", "0") == "1"
+const ROLLSPLIT_N = Base.Ref(0)
 function _pose(T::Track, c::Car)
     P = T.P
     x, z, _ = tworld(T, c.s, c.d)
     heq = P.ride - 9.80665/P.alt_k1
     y = c.yroad + (c.h - heq)
+    (LIFTDIAG && abs(c.h - heq) > 0.08 && (LIFTDIAG_N[] += 1) % 5 == 1) &&
+        println("  [ailift] s ", round(c.s, digits = 1), " d ", round(c.d, digits = 2), " lift ", round(c.h - heq, digits = 3),
+                " v ", round(c.v, digits = 1), " hv ", round(c.hv, digits = 2), " yroad ", round(c.yroad, digits = 3))
 
     h1 = T.height(c.s + 2.0, c.d, tworld(T, c.s + 2.0, c.d)[1], tworld(T, c.s + 2.0, c.d)[2])
     h0 = T.height(c.s - 2.0, c.d, tworld(T, c.s - 2.0, c.d)[1], tworld(T, c.s - 2.0, c.d)[2])
@@ -714,6 +721,10 @@ function _pose(T::Track, c::Car)
     end
     pitch = pr - P.pitch_k*c.along
     roll  = T.ref.sgn*rr + P.roll_k*c.atire
+    (ROLLSPLIT && abs(roll) > 0.17 && (ROLLSPLIT_N[] += 1) % 10 == 1) &&
+        println("  [airollsplit] s ", round(c.s, digits = 1), " d ", round(c.d, digits = 2), " roll ", round(rad2deg(roll), digits = 1),
+                " = camber ", round(rad2deg(T.ref.sgn*rr), digits = 1), " + body ", round(rad2deg(P.roll_k*c.atire), digits = 1),
+                " (atire ", round(c.atire, digits = 2), ")")
     (x, isfinite(y) ? y : c.yroad, z, c.yaw, pitch, roll)
 end
 
