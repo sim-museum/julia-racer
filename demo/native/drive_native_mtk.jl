@@ -367,6 +367,7 @@ const RAI_UPSET_DEG = parse(Float64, get(ENV, "JM_RAI_UPSET_DEG", "45")); const 
 const RAI_RESEAT_PACE = parse(Float64, get(ENV, "JM_RAI_RESEAT_PACE", "0.6"))
 
 const RAI_NOSNAP = get(ENV, "JM_RAI_NOSNAP", "1") != "0"
+const RAI_CLASSICFLOOR = get(ENV, "JM_RAI_CLASSICFLOOR", "1") != "0"; const RAI_CLASSICFLOOR_LOG = Ref(true)
 const RAI_OFFHAT = Dict{Int,Int}()
 const RAI_WALLT = Dict{Int,Float64}()
 const RAI_NOSNAP_UPSET = get(ENV, "JM_RAI_NOSNAP_UPSET", "1") != "0"
@@ -5557,6 +5558,36 @@ win = GLFW.CreateWindow(W, H, "Julia Racer — $(uppercasefirst(TRACKSEL))" * (F
 go_fullscreen!() = (FULLSCREEN && GLFW.GetWindowMonitor(win).handle == C_NULL &&
                     GLFW.SetWindowMonitor(win, GLFW.GetPrimaryMonitor(), 0, 0, W, H, GLFW.DONT_CARE); nothing)
 GLFW.MakeContextCurrent(win); GLFW.SwapInterval(1)
+
+const REFRESH_HZ = let hz = try
+        m = GLFW.GetVideoMode(GLFW.GetPrimaryMonitor()); Int(m.refreshrate)
+    catch
+        0
+    end
+    (24 <= hz <= 360) ? hz : 60
+end
+const FRAMELOCK = get(ENV, "JM_FRAMELOCK", "1") != "0"
+const FL_ACC = Ref(0.0); const FL_EMA = Ref(NaN)
+const FL_DIAG = get(ENV, "JM_FRAMELOCK_DIAG", "0") != "0"; const FL_CNT = zeros(Int, 5)
+println("  [framelock] ", FRAMELOCK ? "on" : "off (JM_FRAMELOCK=0)", ": display refresh ", REFRESH_HZ, " Hz")
+"PERF-7 Phase 3: this frame's sim step -- whole refresh periods while vsync holds, else the wall-clock interval."
+function frame_dt(raw::Float64)
+    FIXED_DT > 0 && return FIXED_DT
+    w = clamp(raw, 0.0, 0.05)
+    FRAMELOCK || return w
+    FL_EMA[] = isnan(FL_EMA[]) ? raw : 0.9*FL_EMA[] + 0.1*clamp(raw, 0.0, 0.2)
+    T = PACE_INT[] / REFRESH_HZ
+    if FL_DIAG
+        FL_CNT[5] += 1
+        FL_CNT[5] % 600 == 0 && (println("  [framelock] 600 frames: 1/2/3 periods ", FL_CNT[1], "/", FL_CNT[2], "/", FL_CNT[3], ", wall clock ", FL_CNT[4],
+                                         " (interval EMA ", round(1000*FL_EMA[], digits = 2), " ms, period ", round(1000*T, digits = 2), " ms)"); fill!(FL_CNT, 0))
+    end
+    FL_EMA[] < 0.75*T && (FL_DIAG && (FL_CNT[4] += 1); FL_ACC[] = 0.0; return w)
+    FL_ACC[] += clamp(raw, 0.0, 0.1)
+    n = clamp(round(Int, FL_ACC[] / T), 1, 3)
+    d = n*T; FL_ACC[] = clamp(FL_ACC[] - d, -T, T); FL_DIAG && (FL_CNT[n] += 1)
+    d
+end
 
 const KEY_LATCH = Dict{GLFW.Key,Int}()
 
@@ -10841,6 +10872,21 @@ function main()
     _DX_OBJCENSUS && dx_objcensus()
     AILINE = (CLINE !== nothing && N_AI > 0) ? CLINE : nothing
 
+    if AILINE !== nothing && get(ENV, "JM_AI_KAPPA_DEJOG", "0") != "0"
+        let r = RaceAI.dejog_kappa(AILINE)
+            AILINE = r[1]
+            println("  [ailine] curvature: ", r[2], " jog nodes, kappa lowered by up to ", round(r[3], digits = 4), " /m at s ",
+                    join(("$(a)-$(b)" for (a, b) in r[4]), ", "), " (no line moved)")
+        end
+    end
+
+    if AILINE !== nothing && get(ENV, "JM_AI_DEJOG", "0") != "0"
+        let r = RaceAI.dejog(AILINE)
+            AILINE = r[1]
+            println("  [ailine] dejog: ", r[2], " jog nodes on the centreline, moved up to ", round(r[3], digits = 2), " m (the AI's line only)")
+        end
+    end
+
     if AILINE !== nothing && get(ENV, "JM_AI_CLASSICLINE", "1") != "0"
 
         if MONZA || ZANDV || get(ENV, "JM_AI_CLASSICLINE_ALL", "1") != "0"
@@ -11088,7 +11134,7 @@ function main()
                                 pts = Tuple{Float64,Int,Float64,Float64}[]
 
                                 local rl, q, loc, w, g, d, wrong, edge, sg, glat, fi, same, runs_, kk_au, pp_au, a1_au, b1_au, a2_au, b2_au, a3_au, b3_au,
-                                      cr_au, d1_au, d2_au, d3_au, kp_au
+                                      cr_au, d1_au, d2_au, d3_au, kp_au, ed_au, rl_e, q_e, nx_e, nz_e, g0_e, hi_e, nm_e, sd_e, bd_e
                                 for s in 0.0:st:AILINE.total - st
                                     rl = something(RaceAI.classic_racelane(AILINE, s), RaceAI.racelane(AILINE, s))
                                     q = RaceAI.pose_at(AILINE, s, rl); loc = classicw_locate_any(q[1], q[3]); loc === nothing && continue
@@ -11126,6 +11172,22 @@ function main()
                                     cr_au = (a2_au - a1_au)*(b3_au - b2_au) - (b2_au - b1_au)*(a3_au - a2_au); d1_au = hypot(a2_au - a1_au, b2_au - b1_au); d2_au = hypot(a3_au - a2_au, b3_au - b2_au); d3_au = hypot(a3_au - a1_au, b3_au - b1_au)
                                     kp_au = (d1_au*d2_au*d3_au > 1e-6) ? 2cr_au/(d1_au*d2_au*d3_au) : 0.0
                                     abs(kp_au) > 0.03 && push!(kk_au, (s, abs(kp_au)))
+                                end
+
+                                for (nm_e, sd_e) in (("race line", 0), ("pass1 rail", 1), ("pass2 rail", -1), ("band's low edge", 2), ("band's high edge", 3))
+                                    ed_au = Tuple{Float64,Float64}[]
+                                    for s in 0.0:st:AILINE.total - st
+                                        rl_e = sd_e >= 2 ? (bd_e = RaceAI.classic_band(AILINE, s; margin = RaceAI.BAND_MARGIN);
+                                                            bd_e === nothing ? NaN : bd_e[sd_e - 1]) :
+                                               something(RaceAI.classic_racelane(AILINE, s), RaceAI.racelane(AILINE, s)) +
+                                               (sd_e == 0 ? 0.0 : something(RaceAI.classic_rail(AILINE, s, sd_e), 0.0))
+                                        isfinite(rl_e) || continue
+                                        q_e = RaceAI.pose_at(AILINE, s, rl_e); nx_e = -sin(q_e[4]); nz_e = cos(q_e[4])
+                                        g0_e = groundz_ai(q_e[1], q_e[3])
+                                        hi_e = maximum(groundz_ai(q_e[1] + o*nx_e, q_e[3] + o*nz_e) - g0_e for o in (-0.9, -0.45, 0.45, 0.9))
+                                        hi_e > 0.5 && push!(ed_au, (s, hi_e))
+                                    end
+                                    println("  [ailine] AI ", nm_e, " over a raised edge (> 0.5 m within +-0.9 m): ", round(Int, st*length(ed_au)), " m", runs_(ed_au, "m up"))
                                 end
                                 println("  [ailine] AI path curvature > 0.03 /m (R < 33 m): ", round(Int, st*length(kk_au)), " m", runs_(kk_au, "/m peak"),
                                         "; the line's own kappa there: ", isempty(kk_au) ? "-" : join((string(round(Int, s), ":", round(RaceAI.curv_at(AILINE, s), digits = 3))
@@ -12492,7 +12554,7 @@ function main()
 
         now = time()
         ALLOCPROF > 0 && (ALLOC_MARK[1] = Base.gc_bytes())
-        dt = FIXED_DT > 0 ? FIXED_DT : clamp(now-last, 0.0, 0.05)
+        dt = frame_dt(now - last)
         last = now
         GEAR_NOW[] = cs.gear; RPM_NOW[] = cs.rpm; V_NOW[] = cs.v
         inp, rst, recover, restart = read_input()

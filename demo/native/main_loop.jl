@@ -638,7 +638,7 @@ function player_drive_step!(cs, inp, dt, rst, groundz, groundz_phys, roll_ter, f
         VDIAG_T[] = cs.t
         println("  [vdiag] t ", round(cs.t, digits = 1), " s ", round(cs.lapdist, digits = 0), " v ", round(cs.v*3.6, digits = 0),
             "  y-road ", round(cs.y - groundz_phys(cs.x, cs.z), digits = 2), "  zref-road ", round(cs.zref - groundz_phys(cs.x, cs.z), digits = 2),
-            "  heave ", round(cs.heave, digits = 3), "  vref ", round(get(DriveRT3D._VREF, cs, NaN), digits = 2),
+            "  heave ", round(cs.heave, digits = 3), "  vref ", round(cs.vref_set ? cs.vref : NaN, digits = 2),
             "  yaw ", round(rad2deg(cs.θ), digits = 2), " vmm ", round(1000cs.v, digits = 1), " brk ", round(inp.brake, digits = 2), " st ", round(inp.steer, digits = 3),
             "  y-mesh ", (let r = JRTrack.hat3d(ROADHAT, cs.x, cs.z; ref = cs.y + 3.0); r[3] ? round(cs.y - r[1], digits = 2) : NaN end)); flush(stdout)
     end
@@ -2700,6 +2700,25 @@ function rai_profile(line, a, b; ds = 2.0)
         κ = [min(κ[k], maximum(k3(x + d) for d in -4.0:2.0:4.0)) for (k, x) in enumerate(st)]
     end
 
+    if RAI_CLASSICFLOOR && RaceAI.CLASSICV[] !== nothing
+        let g = RaceAI.CLASSICV[], ng = length(g), rec = line.total/length(RaceAI.CLASSICV[]), nfl = 0, s_fl = Float64[]
+            gat(x) = g[mod(floor(Int, mod(x, line.total)/rec), ng) + 1]
+            for (k, x) in enumerate(st)
+                gv = gat(x); gmx = maximum(gat(x + d) for d in -150.0:10.0:150.0)
+                if gv >= 0.95*gmx && sqrt(a/max(κ[k], 1e-5)) < 0.8*gv
+                    κ[k] = min(κ[k], a/gv^2); nfl += 1; push!(s_fl, x)
+                end
+            end
+            if RAI_CLASSICFLOOR_LOG[]
+                RAI_CLASSICFLOOR_LOG[] = false
+                rg = Tuple{Float64,Float64}[]
+                for x in s_fl; (!isempty(rg) && x - rg[end][2] <= 3ds) ? (rg[end] = (rg[end][1], x)) : push!(rg, (x, x)); end
+                println("  [rprof] Classic-flat floor: ", nfl, " stations (", round(Int, nfl*ds), " m) where our curvature read a corner Classic drives flat: s ",
+                        join(("$(round(Int, r[1]))-$(round(Int, r[2]))" for r in rg), ", "), " (JM_RAI_CLASSICFLOOR=0: off)"); flush(stdout)
+            end
+        end
+    end
+
     vc(k) = (v_ = min(sqrt(a/max(k, 1e-5)), 80.0); for _ in 1:6; v_ = min(sqrt(a*wet_mu(v_)/max(k, 1e-5)), 80.0); end; v_)
     v = [vc(k) for k in κ]
     for _ in 1:2, k in n:-1:1
@@ -3085,6 +3104,7 @@ function aiphys_poses!(cs, ddt, ai_hit, AICARS, AILINE, AIPHYS, ai_onroad, ai_st
                 RAI_OUT[i] = RAI_CLOCK[]; delete!(RAI_REC, i)
                 incident!(pc.x, pc.z, string("AI ", i, " crashed"))
                 println("  [airec] AI ", i, " retired at s ", round(Int, s), ": off the terrain (", round(pc.v*3.6), " km/h)"); flush(stdout)
+                RAI_SNAPDIAG && rai_hist_dump(i, AILINE)
                 off = false
             elseif offhat && RAI_NOSNAP_UPSET
                 off = false
@@ -3092,6 +3112,7 @@ function aiphys_poses!(cs, ddt, ai_hit, AICARS, AILINE, AIPHYS, ai_onroad, ai_st
                 RAI_OUT[i] = RAI_CLOCK[]; delete!(RAI_REC, i)
                 incident!(pc.x, pc.z, string("AI ", i, " crashed"))
                 println("  [airec] AI ", i, " retired at s ", round(Int, s), ": overturned", upwhy, " (", round(pc.v*3.6), " km/h)"); flush(stdout)
+                RAI_SNAPDIAG && rai_hist_dump(i, AILINE)
                 off = false
             elseif !(upset || offhat)
                 if (abs(lat) > 9.0 || spun) && !haskey(RAI_REC, i)
