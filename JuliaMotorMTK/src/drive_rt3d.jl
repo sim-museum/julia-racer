@@ -497,7 +497,13 @@ mutable struct Car3D
     grounded::Bool
 
     toff::Float64
+
+    vref::Float64; vref_set::Bool
+    gsl::NTuple{2,Float64}; gsl_set::Bool
+    gslt::Float64
 end
+"Forget the vertical frame's velocity (VFRAME-1): the next step adopts the road's (after any teleport/reset)."
+vref_clear!(c) = (c.vref_set = false; nothing)
 
 function _musetters(sys)
     try
@@ -584,14 +590,14 @@ function build_car3d(; x0 = 0.0, z0 = 0.0, θ0 = 0.0, v0 = 0.0, y0 = 0.0,
               _musetters(sys),
               getall, 1, y0, ntuple(_->0.0,4),
               x0, y0, z0, θ0, v0, 0.0, 0.0, 1, ntuple(_->(0.0,0.0,0.0),4),
-              0.0, 0, 0.0, 0.0, true, 0.0, 0.0, 9.80665, 0.0, RIDE_H[], false, 0.0)
+              0.0, 0, 0.0, 0.0, true, 0.0, 0.0, 9.80665, 0.0, RIDE_H[], false, 0.0, 0.0, false, (0.0, 0.0), false, -Inf)
     c.s_gr(c.integ, GEARS[c.gear]); getall(integ)
     for _ in 1:3; step_car3d!(c, 0.3, 0.0, 0.0, 1/60); end
     for _ in 1:3; step_car3d!(c, 0.3, 0.0, 0.0, 1/60; clutch = 0.5, manual = true); end
     reinit!(c.integ); c.gear = 0; c.s_gr(c.integ, 0.0)
     a = getall(c.integ); c.x = a[1]; c.z = a[2]; c.θ = a[3]; c.v = sqrt(a[4]^2 + a[5]^2); c.rpm = a[6]
     c.zref = y0; c.zr_prev = ntuple(_->0.0, 4)
-    delete!(_VREF, c)
+    vref_clear!(c)
     c
 end
 
@@ -638,25 +644,23 @@ function _build_cars3d(poses; brush = !haskey(ENV, "JM_MAGIC"), dt = 1/300)
                   s_fx,s_fy,s_mz,s_cda, s_mu,
                   getall, 1, 0.0, ntuple(_->0.0,4),
                   x0, 0.0, z0, θ0, v0, 0.0, 0.0, 1, ntuple(_->(0.0,0.0,0.0),4),
-                  0.0, 0, 0.0, 0.0, true, 0.0, 0.0, 9.80665, 0.0, RIDE_H[], false, 0.0)
+                  0.0, 0, 0.0, 0.0, true, 0.0, 0.0, 9.80665, 0.0, RIDE_H[], false, 0.0, 0.0, false, (0.0, 0.0), false, -Inf)
         c.s_gr(c.integ, GEARS[c.gear]); getall(integ)
         for _ in 1:3; step_car3d!(c, 0.3, 0.0, 0.0, 1/60); end
         for _ in 1:3; step_car3d!(c, 0.3, 0.0, 0.0, 1/60; clutch=0.5, manual=true); end
         reinit!(c.integ); c.gear=0; c.s_gr(c.integ, 0.0)
         a=getall(c.integ); c.x=a[1]; c.z=a[2]; c.θ=a[3]; c.v=sqrt(a[4]^2+a[5]^2); c.rpm=a[6]
-        c.zref=0.0; c.zr_prev=ntuple(_->0.0,4); delete!(_VREF, c)
+        c.zref=0.0; c.zr_prev=ntuple(_->0.0,4); vref_clear!(c)
         push!(cars, c)
     end
     cars
 end
 
 const VFRAME_INERTIAL = lowercase(get(ENV, "JM_VFRAME", "inertial")) != "legacy"
-const _VREF = IdDict{Any,Float64}()
 
 const SLOPE_G = Ref(true)
 const SLOPE_TAU = 0.05
 const _GSET = IdDict{Any,Any}()
-const _GSL = IdDict{Any,NTuple{2,Float64}}()
 function _slope_gravity!(c, terr, grounded, subdt)
     sx, sy = 0.0, 0.0
     if SLOPE_G[] && grounded && all(isfinite, terr)
@@ -665,19 +669,18 @@ function _slope_gravity!(c, terr, grounded, subdt)
         gx = clamp(gx, -0.35, 0.35); gy = clamp(gy, -0.35, 0.35)
         sx = gx/sqrt(1 + gx^2 + gy^2); sy = gy/sqrt(1 + gx^2 + gy^2)
     end
-    p = get(_GSL, c, (sx, sy)); α = min(1.0, subdt/SLOPE_TAU)
-    q = (p[1] + α*(sx - p[1]), p[2] + α*(sy - p[2])); _GSL[c] = q
+    p = c.gsl_set ? c.gsl : (sx, sy); α = min(1.0, subdt/SLOPE_TAU)
+    q = (p[1] + α*(sx - p[1]), p[2] + α*(sy - p[2])); c.gsl = q; c.gsl_set = true
     st = get!(() -> (ModelingToolkit.setp(c.sys, c.sys.sgx), ModelingToolkit.setp(c.sys, c.sys.sgy)), _GSET, c.sys)
     st[1](c.integ, q[1]); st[2](c.integ, q[2])
-    if SLOPE_DIAG[] > 0 && c.t >= get(_GSLT, c, -Inf) + SLOPE_DIAG[]
-        _GSLT[c] = c.t
+    if SLOPE_DIAG[] > 0 && c.t >= c.gslt + SLOPE_DIAG[]
+        c.gslt = c.t
         println("  [slope] t ", round(c.t; digits = 2), " s ", round(c.lapdist; digits = 1), " v ", round(c.v; digits = 1),
                 " sgx ", round(q[1]; digits = 4), " sgy ", round(q[2]; digits = 4))
     end
     q
 end
 const SLOPE_DIAG = Ref(0.0)
-const _GSLT = IdDict{Any,Float64}()
 const _VSTATE = IdDict{Any,Any}()
 _vstate(c) = get!(_VSTATE, c.sys) do
     vs = [c.sys.w, c.sys.wFL.vu, c.sys.wFR.vu, c.sys.wRL.vu, c.sys.wRR.vu]
@@ -719,14 +722,14 @@ function _substeps!(c, integ, getall, get9, szr, svr, groundz, nsub, subdt)
 
         if VFRAME_INERTIAL
 
-            vref = isfinite(terr_cg) ? vr_cg + clamp(terr_cg - c.zref, -1.5, 1.5)*10.0 : get(_VREF, c, 0.0)
+            vref = isfinite(terr_cg) ? vr_cg + clamp(terr_cg - c.zref, -1.5, 1.5)*10.0 : (c.vref_set ? c.vref : 0.0)
 
-            vref0 = get(_VREF, c, vref)
+            vref0 = c.vref_set ? c.vref : vref
             if vref != vref0
                 gs = _vstate(c)
                 gs[2](integ, gs[1](integ) .+ (vref0 - vref)); OrdinaryDiffEq.SciMLBase.u_modified!(integ, true)
             end
-            _VREF[c] = vref; c.zref += vref*subdt
+            c.vref = vref; c.vref_set = true; c.zref += vref*subdt
             zr = ntuple(i -> terr_s[i] - c.zref, 4)
             for i in 1:4; szr[i](integ, zr[i]); svr[i](integ, vr[i] - vref); end
         else
@@ -815,7 +818,7 @@ function step_car3d!(c::Car3D, throttle, brake, steer, dt;
     if !(isfinite(c.pitch) && isfinite(c.roll) && isfinite(c.heave)) || abs(c.heave) > 12.0 ||
        (!airborne && (abs(c.pitch) > 0.7 || abs(c.roll) > 0.7)) ||
        (airborne && (abs(c.pitch) > 12.0 || abs(c.roll) > 12.0))
-        c.s_vreset(c.integ, zeros(14)); delete!(_VREF, c)
+        c.s_vreset(c.integ, zeros(14)); vref_clear!(c)
         c.heave = 0.0; c.pitch = 0.0; c.roll = 0.0; c.vacc = 9.80665
     end
     if c.rpm < 350.0 && (clamp(clutch, 0, 1) > 0.5 || c.gear == 0)
@@ -935,7 +938,7 @@ function contain3d!(c::Car3D, xnew, znew; vdamp = 0.45, settle = false, groundz 
     c.s_vel(c.integ, [a[4]*vdamp, a[5]*vdamp])
     c.x = xnew; c.z = znew; c.v = sqrt((a[4]*vdamp)^2 + (a[5]*vdamp)^2)
     if settle
-        c.s_vreset(c.integ, zeros(14)); delete!(_VREF, c)
+        c.s_vreset(c.integ, zeros(14)); vref_clear!(c)
         c.heave = 0.0; c.pitch = 0.0; c.roll = 0.0; c.vacc = 9.80665
         if groundz !== nothing
             h = groundz(xnew, znew); isfinite(h) && (c.zref = Float64(h))
@@ -951,7 +954,7 @@ function respawn3d!(c::Car3D; groundz = nothing)
 
     c.toff += c.integ.t
     reinit!(c.integ); c.gear = g0; c.s_gr(c.integ, gearratio(g0))
-    c.s_vreset(c.integ, zeros(14)); delete!(_VREF, c)
+    c.s_vreset(c.integ, zeros(14)); vref_clear!(c)
     a = c.getall(c.integ); c.x = a[1]; c.z = a[2]; c.θ = a[3]; c.v = a[4]; c.rpm = a[6]
     c.heave = 0.0; c.pitch = 0.0; c.roll = 0.0; c.vacc = 9.80665
 
@@ -1112,7 +1115,7 @@ function pin3d!(c::Car3D, x, z, θ, h)
     place3d!(c, x, z, θ; v = 0.0)
     gs = get!(() -> (ModelingToolkit.getsym(c.sys, c.sys.r), ModelingToolkit.setu(c.sys, c.sys.r)), _RSET3D, c.sys)
     gs[2](c.integ, 0.0)
-    c.s_vreset(c.integ, zeros(14)); delete!(_VREF, c)
+    c.s_vreset(c.integ, zeros(14)); vref_clear!(c)
     c.heave = 0.0; c.pitch = 0.0; c.roll = 0.0; c.vacc = 9.80665
     isfinite(h) && (c.zref = Float64(h))
     c.zr_prev = ntuple(_ -> 0.0, 4); c.y = c.zref
@@ -1135,7 +1138,7 @@ function reseat3d!(c::Car3D, x, z, θ; v = 0.0, h = NaN)
     ws[1](c.integ, [v/0.30; fill(v/RW_R, ws[2] - 1)])
 
     c.s_we(c.integ, clamp(abs(v)/RW_R*abs(gearratio(c.gear))*FINAL[], 209.4, 942.0))
-    c.s_vreset(c.integ, zeros(14)); delete!(_VREF, c); delete!(_GSL, c)
+    c.s_vreset(c.integ, zeros(14)); vref_clear!(c); c.gsl_set = false
     c.heave = 0.0; c.pitch = 0.0; c.roll = 0.0; c.vacc = 9.80665
     isfinite(h) && (c.zref = Float64(h); c.y = c.zref)
     c.zr_prev = ntuple(_ -> 0.0, 4)

@@ -13,6 +13,84 @@ end
 
 wrapπ(a) = a > π ? a - 2π : a < -π ? a + 2π : a
 
+"""AI-TRACKS-1 S3: the racing line's curvature without the centreline's fork JOGS. κ drives the corner-speed model; at Monza's
+pit fork (s 5680-5700) the jog read 0.03-0.05 /m, a 45-65 km/h "corner" on the main straight: the field braked from 169 to
+~85 km/h there every lap and, slow, swerved through the jog (steer +-0.8, yaw 1.5 rad/s) onto the pit wall or its roof. A JOG on
+the racing-line path (centreline + rl): curvature > `kmin` with < `dhmax` of heading change over +-`span` m. There κ becomes the
+net heading change over that span / its length (a straight's ~0), blended in over `ramp` m. No line moves. Returns
+(line, jog nodes, the largest κ removed)."""
+function dejog_kappa(L::AILine; kmin = 0.02, dhmax = deg2rad(10.0), span = 15.0, hold = 15.0, ramp = 15.0)
+    n = length(L.x); ds = L.total / n
+    w = max(1, round(Int, span / ds)); c2 = max(1, round(Int, 2.0 / ds))
+    Q(k) = (i = mod1(k, n); (L.x[i] - L.rl[i]*sin(L.θ[i]), L.z[i] + L.rl[i]*cos(L.θ[i])))
+    hd(k) = let u_ = Q(k + 1), v_ = Q(k - 1); atan(u_[2] - v_[2], u_[1] - v_[1]) end
+    jog = falses(n); net = zeros(n)
+    for k in 1:n
+        a = Q(k - c2); b = Q(k); c = Q(k + c2)
+        cr = (b[1] - a[1])*(c[2] - b[2]) - (b[2] - a[2])*(c[1] - b[1])
+        d = hypot(b[1] - a[1], b[2] - a[2])*hypot(c[1] - b[1], c[2] - b[2])*hypot(c[1] - a[1], c[2] - a[2])
+        kap = d > 1e-9 ? 2cr/d : 0.0
+        dh = wrapπ(hd(k + w) - hd(k - w)); net[k] = abs(dh) / (2w*ds)
+        jog[k] = abs(kap) > kmin && abs(dh) < dhmax
+    end
+    js = findall(jog)
+    isempty(js) && return (L, 0, 0.0, Tuple{Int,Int}[])
+    κ = copy(L.κ); mx = 0.0
+    for k in 1:n
+        wt = 0.0
+        for j in js
+            dk = abs(k - j); dk = min(dk, n - dk)*ds
+            wt = max(wt, dk <= hold ? 1.0 : dk <= hold + ramp ? 1.0 - (dk - hold)/ramp : 0.0)
+        end
+        wt > 0 || continue
+        nk = (1 - wt)*L.κ[k] + wt*min(L.κ[k], net[k])
+        mx = max(mx, L.κ[k] - nk); κ[k] = nk
+    end
+
+    ch = findall(k -> κ[k] < L.κ[k] - 1e-4, 1:n); rg = Tuple{Int,Int}[]
+    for k in ch; (!isempty(rg) && k - rg[end][2] <= 2) ? (rg[end] = (rg[end][1], k)) : push!(rg, (k, k)); end
+    (AILine(L.x, L.z, L.y, L.s, L.θ, κ, L.rl, L.total), length(js), mx, [(round(Int, (a - 1)*ds), round(Int, (b - 1)*ds)) for (a, b) in rg])
+end
+
+"""AI-TRACKS-1 S1: the line with its JOGS smoothed out -- for the AI only (the player's CLINE keeps its own). Our centreline kinks
+where it meets a road fork (Monza's pit fork, s 336-356 and 5686-5716: curvature 0.04-0.05 /m on the straight, the AI path 0.24-0.3
+/m; AI-NOSNAP-1 S3/S4), and a lane offset on 3 m Classic records cannot cancel it. A JOG = curvature > `kmin` with < `dhmax` of heading
+change over +-`span` m (a corner turns; a hairpin is left alone). There the nodes move to a +-`span` m moving average, fully within
+`hold` m of a jog and blended out over `ramp` m more; the heading follows the new chords. `s`, `total`, κ (the racing line's) and
+rl are kept: the AI's lap distance is the player's. Returns (line, jog nodes, max shift)."""
+function dejog(L::AILine; kmin = 0.03, dhmax = deg2rad(10.0), span = 15.0, hold = 30.0, ramp = 20.0)
+    n = length(L.x); ds = L.total / n
+    w = max(1, round(Int, span / ds)); c2 = max(1, round(Int, 2.0 / ds))
+    P(k) = (L.x[mod1(k, n)], L.z[mod1(k, n)])
+    hd(k) = (a = P(k + 1); b = P(k - 1); atan(a[2] - b[2], a[1] - b[1]))
+    jog = falses(n)
+    for k in 1:n
+        a = P(k - c2); b = P(k); c = P(k + c2)
+        cr = (b[1] - a[1])*(c[2] - b[2]) - (b[2] - a[2])*(c[1] - b[1])
+        d = hypot(b[1] - a[1], b[2] - a[2])*hypot(c[1] - b[1], c[2] - b[2])*hypot(c[1] - a[1], c[2] - a[2])
+        kap = d > 1e-9 ? 2cr/d : 0.0
+        dh = wrapπ(hd(k + w) - hd(k - w))
+        jog[k] = abs(kap) > kmin && abs(dh) < dhmax
+    end
+    js = findall(jog)
+    isempty(js) && return (L, 0, 0.0)
+    wt = zeros(n)
+    for k in 1:n, j in js
+        dk = abs(k - j); dk = min(dk, n - dk)*ds
+        wt[k] = max(wt[k], dk <= hold ? 1.0 : dk <= hold + ramp ? 1.0 - (dk - hold)/ramp : 0.0)
+    end
+    x = copy(L.x); z = copy(L.z); mx = 0.0
+    for k in 1:n
+        wt[k] > 0 || continue
+        sx = 0.0; sz = 0.0
+        for j in -w:w; p = P(k + j); sx += p[1]; sz += p[2]; end
+        nx = (1 - wt[k])*L.x[k] + wt[k]*sx/(2w + 1); nz = (1 - wt[k])*L.z[k] + wt[k]*sz/(2w + 1)
+        mx = max(mx, hypot(nx - L.x[k], nz - L.z[k])); x[k] = nx; z[k] = nz
+    end
+    θ = [atan(z[i%n+1] - z[i], x[i%n+1] - x[i]) for i in 1:n]
+    (AILine(x, z, L.y, L.s, θ, L.κ, L.rl, L.total), length(js), mx)
+end
+
 const VMAX = Ref(something(tryparse(Float64, get(ENV, "JM_AI_VMAX", "")), 87.8))
 """Set the AI top-speed anchor [m/s]. Rejects implausible values: the fallback must win over a
    bad derivation rather than produce a car that does 900 km/h or 40 km/h."""
