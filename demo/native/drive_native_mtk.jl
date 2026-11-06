@@ -313,6 +313,8 @@ println("  [aistyle] AI driving style: ", AI_STYLE_NAME)
 const RAI_TC = get(ENV, "JM_RAI_TC", "1") != "0"
 const RAI_PP = get(ENV, "JM_RAI_PP", "1") != "0"
 const RAI_KAPPA3 = get(ENV, "JM_RAI_KAPPA3", "1") != "0"
+const RAI_KAPPA3_JOG = get(ENV, "JM_RAI_KAPPA3_JOG", "1") != "0"
+const RAI_KAPPA3_TURN = deg2rad(parse(Float64, get(ENV, "JM_RAI_KAPPA3_TURN", "10")))
 const RAI_PROF_ON = get(ENV, "JM_RAI_PROF", "1") != "0"
 
 const RAI_PACE_OLD = get(ENV, "JM_RAI_PACE_OLD", "0") != "0"
@@ -348,6 +350,20 @@ const RAI_SPELL = Vector{Tuple{Int,Int}}()
 
 const RAI_WALLS = get(ENV, "JM_RAI_WALLS", "1") != "0"
 
+const RAI_OBSLANE = get(ENV, "JM_RAI_OBSLANE", "1") != "0"
+const RAI_OBSLANE_M = parse(Float64, get(ENV, "JM_RAI_OBSLANE_M", "0.35"))
+const RAI_OBSLANE_PRE = parse(Float64, get(ENV, "JM_RAI_OBSLANE_PRE", "100"))
+const RAI_OBSLIM = Ref{Any}(nothing)
+const RAI_OBSHOLD = get(ENV, "JM_RAI_OBSHOLD", "1") != "0"
+const RAI_OBS_ALAT = parse(Float64, get(ENV, "JM_RAI_OBS_ALAT", "4.0"))
+const RAI_OBS_LA = parse(Float64, get(ENV, "JM_RAI_OBS_LA", "0"))
+const RAI_PASSOBS = get(ENV, "JM_RAI_PASSOBS", "1") != "0"
+const RAI_WIDE_BRK = parse(Float64, get(ENV, "JM_RAI_WIDE_BRK", "0.25"))
+const RAI_WIDE_N = Ref(0)
+const RAI_PASS_ALAT = parse(Float64, get(ENV, "JM_RAI_PASS_ALAT", "6.0"))
+const RAI_OBS_T = parse(Float64, get(ENV, "JM_RAI_OBS_T", "0.5"))
+const RAI_LANEPREV = Float64[]; const RAI_LATV = Float64[]
+
 const RAI_FOLLOW = get(ENV, "JM_RAI_FOLLOW", "1") != "0"
 const RAI_FOLLOW_MARGIN = parse(Float64, get(ENV, "JM_RAI_FOLLOW_MARGIN", "2.0"))
 const RAI_DROOP = get(ENV, "JM_RAI_DROOP", "1") != "0"
@@ -372,9 +388,20 @@ const RAI_CLOCK = Ref(0.0); const RAI_TOTAL = Ref(1.0)
 const RAI_PROXDIAG = get(ENV, "JM_RAI_PROXDIAG", "0") != "0"; const RAI_PROX = Ref(Inf)
 const RAI_SNAPDIAG = get(ENV, "JM_RAI_SNAPDIAG", "0") != "0"
 const RAI_HIST = Vector{NTuple{8,Float64}}[]
+const RAI_HIST2 = Vector{NTuple{7,Float64}}[]
 const RAI_GRIDSEAT = get(ENV, "JM_RAI_GRIDSEAT", "1") != "0"
 const RAI_ROLLDIAG = get(ENV, "JM_RAI_ROLLDIAG", "0") != "0"
 const RAI_SOLID_LAUNCH = get(ENV, "JM_RAI_SOLID_LAUNCH", "0") != "0"; const RAI_SOLIDHITS = Ref(0)
+
+const RAI_HIT_E = parse(Float64, get(ENV, "JM_RAI_HIT_E", "0.1"))
+const RAI_HIT_OUT_MS = parse(Float64, get(ENV, "JM_RAI_HIT_OUT", "20"))
+"S6: solid_hit's impulse re-sized for a physics AI -> (impulse, closing speed m/s, crash?). solid_hit's j = 1.45 x closing."
+function ai_hit_scale(ho)
+    cl = hypot(ho[1], ho[2])/1.45
+    crash = cl > RAI_HIT_OUT_MS
+    f = (1.0 + (crash ? 0.0 : RAI_HIT_E))/1.45
+    ((ho[1]*f, ho[2]*f, ho[3]*f, ho[4], ho[5], ho[6]), cl, crash)
+end
 const RAI_CLASSICRAIL = get(ENV, "JM_RAI_CLASSICRAIL", "1") != "0"
 const RAI_UPSET_DEG = parse(Float64, get(ENV, "JM_RAI_UPSET_DEG", "45")); const RAI_UPSET_H = parse(Float64, get(ENV, "JM_RAI_UPSET_H", "1.5"))
 const RAI_RESEAT_PACE = parse(Float64, get(ENV, "JM_RAI_RESEAT_PACE", "0.6"))

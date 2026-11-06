@@ -1022,12 +1022,14 @@ end
 `dev`iation, e.g. ±RAIL to pull out alongside) at speed `tv` (short-look-ahead pursuit +
 cross-track + yaw-damp, corner throttle-cut).  `cs`/`clane` = the car's current arc-length/
 lateral (from projection), `cθ`/`cv`/`r` its heading/speed/yaw-rate.  Returns (thr, brk, steer)."""
-function controller(line::AILine, cs, clane, dev, tv, cx, cz, cθ, cv, r; power = 1.0, pp = false, amax = 8.0, lo = -Inf, hi = Inf, holdwall = false)
+function controller(line::AILine, cs, clane, dev, tv, cx, cz, cθ, cv, r; power = 1.0, pp = false, amax = 8.0, lo = -Inf, hi = Inf, holdwall = false, la_max = Inf)
     la = clamp(6.0 + cv*0.35, 6.0, 20.0)
 
     κloc = max(curv_at(line, cs), curv_at(line, cs + 0.5*la), 1e-4)
     pp && PP_LA_T > 0 && (la = max(la, PP_LA_T*cv))
     la = clamp(min(la, 0.32/κloc), 4.0, pp && PP_LA_T > 0 ? 45.0 : 20.0)
+
+    la = min(la, max(la_max, 4.0))
     tlane = clamp(racelane(line, cs + la) + dev, -LANE_MAX, LANE_MAX)
     tlane = clamp(tlane, lo, hi)
     here  = clamp(racelane(line, cs)      + dev, -LANE_MAX, LANE_MAX)
