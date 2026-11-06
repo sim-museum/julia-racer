@@ -163,7 +163,7 @@ fmt_split(t) = isfinite(t) ? (t < 0 ? "-" : "+") * (ms = round(Int, 1000abs(t));
 band_textscale(h) = h/200
 """Classic's rev counter in the box (x, y, w, h): the dial, its ticks to 10,000 rpm (red from 9,000), the needle, the gear in
 its yellow box, RPM, water/oil (F) and the speed (TD261029-2). Quads into bv, text into tv."""
-function band_tach!(bv, tv, box, rpm, gear, kph, water, oil)
+function band_tach!(bv, tv, box, rpm, gear, kph, water, oil; mode::String = "")
     (x, y, w, h) = box; R = min(w, h)/2; cx = x + w/2; cy = y + h/2; ts = R/80
     Render.hdisc!(bv, cx, cy, R, (0.62, 0.63, 0.66); seg = 40)
     Render.hdisc!(bv, cx, cy, 0.93R, (0.30, 0.31, 0.33); seg = 40)
@@ -183,6 +183,9 @@ function band_tach!(bv, tv, box, rpm, gear, kph, water, oil)
     Render.hquad!(bv, cx - gw/2 - 4, cy - 0.62R - 2, gw + 8, 1.1ts*FONT.lineh + 2, (0.16, 0.15, 0.10))
     Render.text!(tv, FONT, cx - gw/2, cy - 0.62R, gs, GAUGE_YEL; scale = 1.1ts)
     rl = "RPM"; Render.text!(tv, FONT, cx - Render.text_width(FONT, rl; scale = 0.55ts)/2, cy - 0.22R, rl, (0.70, 0.70, 0.72); scale = 0.55ts)
+
+    isempty(mode) || Render.text!(tv, FONT, cx - 0.05R - Render.text_width(FONT, mode; scale = 0.7ts), cy + 0.20R, mode,
+                                  mode == "AUTO" ? (1.0, 0.55, 0.15) : (0.70, 0.70, 0.72); scale = 0.7ts)
     tl = string(round(Int, water*9/5 + 32), "/", round(Int, oil*9/5 + 32))
     Render.text!(tv, FONT, cx + 0.05R, cy + 0.20R, tl, GAUGE_GRN; scale = 0.7ts)
     sp = string(round(Int, kph)); sw = Render.text_width(FONT, sp; scale = 1.15ts); kw = Render.text_width(FONT, " KPH"; scale = 0.75ts)
@@ -254,7 +257,8 @@ function hudband_draw!(cs, W, H, AICARS, best_lap, last_lap, lap_t0, race_done, 
     end
     gtv = empty!(BAND_GT)
     if BAND_GAUGE_ON
-        band_tach!(bv, gtv, L.tach, cs.rpm, cs.gear, cs.v*3.6, DIALV.water, DIALV.oiltemp)
+        band_tach!(bv, gtv, L.tach, cs.rpm, cs.gear, cs.v*3.6, DIALV.water, DIALV.oiltemp;
+                   mode = isempty(REPLAY_FILE_R[]) ? (CTL.auto ? "AUTO" : "MAN") : "")
         st0 = (IS_RACE && !isempty(AICARS)) ? standings() : nothing
         pk = st0 === nothing ? 1 : something(findfirst(e -> e[1] == 0, st0), 1)
         nf = st0 === nothing ? 1 : length(st0)
