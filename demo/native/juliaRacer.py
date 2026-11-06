@@ -18,6 +18,7 @@ Run:  python3 juliaRacer.py (from demo/native/, or anywhere — paths are resolv
 """
 import json
 import os
+import tempfile
 import re
 import shutil
 import socket
@@ -1633,9 +1634,12 @@ class DriveTab(QWidget):
             return ("default", None, None)
         return (key, None, None)
     def launch(self):
-        if self.warm_alive():
+
+        warm_race = (self.warm_alive() and os.environ.get("JM_WARM_RACE", "1") != "0"
+                     and self.net_mode.currentIndex() == 0)
+        if self.warm_alive() and not warm_race:
             self.end_warm()
-        if self.proc and self.proc.state() != QProcess.ProcessState.NotRunning:
+        if not warm_race and self.proc and self.proc.state() != QProcess.ProcessState.NotRunning:
             return
         if self.net_mode.currentIndex() == 2 and not self.net_host.text().strip():
             QMessageBox.warning(self, "Join a LAN race", "Enter the host's address (shown on the host's launcher).")
@@ -1686,6 +1690,9 @@ class DriveTab(QWidget):
         self._gfx_env(qenv)
         if self.net_mode.currentIndex() == 0:
             qenv.insert("JM_WARM_HOLD", "1")
+        if warm_race:
+            self._warm_race_send(qenv)
+            return
         self._warm = False; self._session_closed = False; self._warm_declined = None
 
         self._result_path = os.path.join(HERE, "last_race_result.txt")
@@ -1742,6 +1749,34 @@ class DriveTab(QWidget):
         self._warm = False
         self.proc.write((line + "\n").encode())
 
+    def _warm_race_send(self, qenv):
+        """WARMRACE-1: the race's launch keys to a file; the held game compares them with its own and runs the race or declines."""
+        fn = os.path.join(tempfile.gettempdir(), f"juliaRacer_warm_race_{os.getpid()}.env")
+        with open(fn, "w", encoding="utf-8") as f:
+            for k in sorted(qenv.keys()):
+                if k.startswith("JM_") or k in ("TRACK", "ZAND_SHIFT"):
+                    f.write(f"{k}={qenv.value(k)}\n")
+        self._warm_race_req = True; self._session_closed = False; self._warm_declined = None; self._stopping = False
+        self._result_path = os.path.join(HERE, "last_race_result.txt")
+        try:
+            os.remove(self._result_path)
+        except OSError:
+            pass
+        try:
+            self._sim_log and self._sim_log.close()
+        except (OSError, ValueError):
+            pass
+        try:
+            self._sim_log = open(os.path.join(HERE, "last_sim_run.log"), "w", encoding="utf-8", errors="replace")
+        except OSError:
+            self._sim_log = None
+        self._launched_at = time.time()
+        self.log.clear()
+        self.log.appendPlainText("next race on the track already loaded (no reload) …")
+        self.launch_b.setEnabled(False)
+        self.stop_b.setEnabled(True)
+        self.send_warm("race " + fn)
+
     def end_warm(self):
         if not self.warm_alive():
             return
@@ -1769,6 +1804,8 @@ class DriveTab(QWidget):
         m = re.search(r"\[warm\] declined: ([^\n]*)", text)
         if m:
             self._warm_declined = m.group(1)
+        if "[warm] race:" in text:
+            self._warm_race_req = False
         if "[instant] replaying" in text and self.on_warm_replay:
             self.on_warm_replay()
 
@@ -1826,6 +1863,13 @@ class DriveTab(QWidget):
 
     def _done(self):
         self._warm = False
+        if getattr(self, "_warm_race_req", False):
+            self._warm_race_req = False; self._session_closed = False; self._stopping = False
+            self.log.appendPlainText("\n— the loaded game could not take this race (" + (getattr(self, "_warm_declined", None) or "it exited")
+                                     + "); loading the track —")
+            self._warm_declined = None
+            QTimer.singleShot(0, self.launch)
+            return
         if getattr(self, "_session_closed", False):
             self._session_closed = False
             self._stopping = False
