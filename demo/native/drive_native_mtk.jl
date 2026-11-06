@@ -78,15 +78,19 @@ const FFB_DESPIKE = parse(Float64, get(ENV, "JM_FFB_DESPIKE", FFB_PHYS ? "0.015"
 const FFB_IRMODE  = FFB_PHYS && get(ENV, "JM_FFB_MODE", "reference") != "legacy"
 const FFB_MAXNM   = parse(Float64, get(ENV, "JM_FFB_MAXNM", "28.33"))
 const FFB_SPRING_IR = parse(Float64, get(ENV, "JM_FFB_SPRING_IR", "0.0"))
-const _JOYCONF = joinpath(@__DIR__, "joystick.conf")
+const _JOYCONF = get(ENV, "JM_JOYCONF", joinpath(@__DIR__, "joystick.conf"))
 
 const JOYNAME = try
     GLFW.Init(); (!SMOKE_NOJOY && GLFW.JoystickPresent(GLFW.JOYSTICK_1)) ? String(GLFW.GetJoystickName(GLFW.JOYSTICK_1)) : ""
 catch
     ""
 end
-const JOYMAP, JOYSRC = JoyCfg.resolve(_JOYCONF, JOYNAME)
-println("  controller: ", JOYSRC)
+
+const JOYMAP_R = Ref{JoyCfg.JoyMap}(); const JOYSRC_R = Ref("")
+(JOYMAP_R[], JOYSRC_R[]) = JoyCfg.resolve(_JOYCONF, JOYNAME)
+joy_ranges(m) = string("throttle ", m.throttle.axis, " ", round(m.throttle.a, digits = 3), "->", round(m.throttle.b, digits = 3),
+                       ", clutch ", m.clutch.axis, " ", round(m.clutch.a, digits = 3), "->", round(m.clutch.b, digits = 3))
+println("  controller: ", JOYSRC_R[], "  (", joy_ranges(JOYMAP_R[]), ")")
 
 if FFB_ON && !isempty(JOYNAME)
     let p = FFB.autocenter_off!()
@@ -94,17 +98,26 @@ if FFB_ON && !isempty(JOYNAME)
     end
 end
 
-const WHEEL_HALF_DEG = JoyCfg.wheel_half_range_deg(JOYNAME; measured = JOYMAP.wheel_half_deg)
+const WHEEL_HALF_DEG_R = Ref(JoyCfg.wheel_half_range_deg(JOYNAME; measured = JOYMAP_R[].wheel_half_deg))
+"WARMRACE-1 S2: a warm race takes the launcher's current calibration (the steering gain follows in apply_session_setup!)."
+function reload_controller!()
+    m, src = JoyCfg.resolve(_JOYCONF, JOYNAME)
+    m == JOYMAP_R[] && return false
+    JOYMAP_R[] = m; JOYSRC_R[] = src
+    WHEEL_HALF_DEG_R[] = JoyCfg.wheel_half_range_deg(JOYNAME; measured = m.wheel_half_deg)
+    println("  [warm] controller: the new calibration taken -- ", src, "  (", joy_ranges(m), ")"); flush(stdout)
+    true
+end
 const STEER_GAIN = Ref(0.0)
 
 const STEER_LIM = Ref(1.0)
 const STEER_RATIO = Ref(10.0)
 
-if JOYMAP.clutch.axis < 1
-    @warn """clutch is NOT on an axis (clutch.axis=$(JOYMAP.clutch.axis)) — the PO's standing
+if JOYMAP_R[].clutch.axis < 1
+    @warn """clutch is NOT on an axis (clutch.axis=$(JOYMAP_R[].clutch.axis)) — the PO's standing
              requirement is a SLIDER you can ride. Check $(_JOYCONF); the X3D default is axis 4."""
 else
-    println("  clutch: axis ", JOYMAP.clutch.axis, " (ridable slider)  <- ", JOYSRC)
+    println("  clutch: axis ", JOYMAP_R[].clutch.axis, " (ridable slider)  <- ", JOYSRC_R[])
 end
 
 function choose_track()
@@ -960,7 +973,8 @@ end
 println("  car setup: ", CARSETUP == "ww103" && IBTTMPL != IBTTMPL_DEFAULT ? "WW103 fast loose" : "reference default",
         "   <- ", basename(IBTTMPL))
 
-let
+function apply_session_setup!()
+    GARAGE_NOTE[] = ""; GARAGE_PP[] = nothing
     if isfile(IBTTMPL)
         try
             pp = session_params(IBTTMPL)
@@ -1003,6 +1017,7 @@ let
         src = isfinite(ratio) ? basename(IBTTMPL) : "built-in 10:1 (Lotus 49 setup) -- NOT from an ibt"
         isfinite(ratio) && ratio > 1 || (ratio = 10.0)
         STEER_RATIO[] = ratio
+        WHEEL_HALF_DEG = WHEEL_HALF_DEG_R[]
         if WHEEL_HALF_DEG > 0
             STEER_GAIN[] = WHEEL_HALF_DEG / ratio / rad2deg(DriveRT3D.MAXSTEER)
             STEER_LIM[] = max(1.0, min(WHEEL_HALF_DEG, DriveRT3D.WHEEL_LOCK_DEG) / ratio / rad2deg(DriveRT3D.MAXSTEER))
@@ -1021,7 +1036,9 @@ let
     println("  ride ht: ", join((round(1000*h, digits=1) for h in DriveRT3D.RIDE_H[]), " / "),
             " mm (FL/FR/RL/RR)   <- ", DriveRT3D.RIDE_H_SRC[])
     println("  chassis: ", DriveRT3D.describe_chassis())
+    nothing
 end
+apply_session_setup!()
 
 const NETMODE  = lowercase(get(ENV, "JM_NET", ""))
 const NET_HOST = get(ENV, "JM_NET_HOST", "127.0.0.1")
@@ -1062,14 +1079,43 @@ function warm_lines()
     @async (while true; l = try readline(stdin) catch; "" end; put!(lines, l); (eof(stdin) || isempty(strip(l))) && break; end)
     lines
 end
+
+const WARM_RACE_ON = get(ENV, "JM_WARM_RACE", "1") != "0"
+const WARM_RACE_FREE = ("JM_GARAGE", "JM_AI_SEED")
+warm_key(k) = startswith(k, "JM_") || k == "TRACK" || k == "ZAND_SHIFT"
+function warm_race_env(p)
+    WARM_RACE_ON || return "warm races are off (JM_WARM_RACE=0)"
+    isfile(p) || return "no such file"
+    want = Dict{String,String}()
+    for l in eachline(p)
+        i = findfirst('=', l); i === nothing && continue
+        k = strip(l[1:i-1]); warm_key(k) && (want[k] = l[i+1:end])
+    end
+    haskey(want, "TRACK") || return "no TRACK in the request"
+    for k in sort!(collect(union(keys(want), filter(warm_key, collect(keys(ENV))))))
+        (k in WARM_RACE_FREE || k == "JM_WARM_HOLD") && continue
+        a = get(ENV, k, "<unset>"); b = get(want, k, "<unset>")
+        a == b || return "$(k) changed ($(a) -> $(b))"
+    end
+    for k in WARM_RACE_FREE
+        haskey(want, k) ? (ENV[k] = want[k]) : delete!(ENV, k)
+    end
+    nothing
+end
 function warm_hold(names)
     warm_hide!()
     lines = warm_lines()
     while true
-        println("  [warm] holding ", TRACKSEL, " (", length(names), " cars) -- waiting for a replay"); flush(stdout)
+        println("  [warm] holding ", TRACKSEL, " (", length(names), " cars) -- waiting for a replay or a race"); flush(stdout)
         while !isready(lines); GLFW.PollEvents(); sleep(0.05); end
         l = strip(take!(lines))
         (isempty(l) || l == "quit") && return nothing
+        if startswith(l, "race ")
+            why = warm_race_env(String(strip(l[6:end])))
+            why === nothing && return :race
+            println("  [warm] declined: ", why); flush(stdout)
+            return nothing
+        end
         startswith(l, "replay ") || continue
         p = String(strip(l[8:end])); why = warm_refuse(p, names)
         why === nothing && (GLFW.ShowWindow(win); go_fullscreen!(); return p)
@@ -9674,6 +9720,20 @@ const JOYTRACE_T = Ref(-1.0)
 
 const CLUTCH_GATE = Ref(-1.0)
 
+const START_AUTO = CTL.auto
+const GEAR_MSG = Ref(0.0)
+const STALL_AT = parse(Float64, get(ENV, "JM_STALL_AT", "-1"))
+const STALL_AT_DONE = Ref(false)
+const GEAR_MSG_TXT = Ref("")
+gearbox_notice!(txt::String, secs::Float64 = 3.0) = (GEAR_MSG_TXT[] = txt; GEAR_MSG[] = secs; nothing)
+function gearbox_restore!()
+    (get(ENV, "JM_GEAR_RESTORE", "1") == "0" || CTL.auto == START_AUTO) && return nothing
+    CTL.auto = START_AUTO
+    gearbox_notice!(START_AUTO ? "Gearbox: AUTO" : "Gearbox: MANUAL (clutch + shift)", 3.0)
+    println("  [gearbox] restart: back to ", START_AUTO ? "AUTO" : "MANUAL", " (the mode the session started with)"); flush(stdout)
+    nothing
+end
+
 const CLU_HIST = Ref(-1.0e9); const GEAR_NOW = Ref(0); const RPM_NOW = Ref(0.0); const V_NOW = Ref(0.0)
 
 function read_input()
@@ -9684,13 +9744,13 @@ function read_input()
         println("  [joy] ", length(js), " axes raw = ", join(round.(js, digits=2), ", "))
         _bs = GLFW.GetJoystickButtons(GLFW.JOYSTICK_1)
         println("        buttons = ", _bs === nothing ? "none" : string(length(_bs)),
-                "   shift-up btn ", JOYMAP.up_btn, ", shift-down btn ", JOYMAP.dn_btn,
-                "   clutch axis ", JOYMAP.clutch.axis)
+                "   shift-up btn ", JOYMAP_R[].up_btn, ", shift-down btn ", JOYMAP_R[].dn_btn,
+                "   clutch axis ", JOYMAP_R[].clutch.axis)
         flush(stdout)
     end
     if js !== nothing && !isempty(js)
         bs = GLFW.GetJoystickButtons(GLFW.JOYSTICK_1)
-        str, thr, brk, clu, up, dn = JoyCfg.apply(JOYMAP, js, bs)
+        str, thr, brk, clu, up, dn = JoyCfg.apply(JOYMAP_R[], js, bs)
         if FS_BTN > 0
             fp = bs !== nothing && length(bs) >= FS_BTN && bs[FS_BTN] != 0
 
@@ -9699,7 +9759,7 @@ function read_input()
                                    toggle_fullscreen!())
             FS_PREV[] = fp
         end
-        STEER_GAIN[] > 0 && (str = JoyCfg.steer_physical(JOYMAP, js, STEER_GAIN[]; lim = STEER_LIM[]))
+        STEER_GAIN[] > 0 && (str = JoyCfg.steer_physical(JOYMAP_R[], js, STEER_GAIN[]; lim = STEER_LIM[]))
     end
 
     key(GLFW.KEY_W) && (thr=1.0); key(GLFW.KEY_S) && (brk=1.0)
@@ -9730,6 +9790,7 @@ function read_input()
             flush(stdout)
         else
             CTL.auto = !CTL.auto
+            gearbox_notice!(CTL.auto ? "Gearbox: AUTO" : "Gearbox: MANUAL (clutch + shift)", 2.0)
             println("  [gearbox] ", CTL.auto ? "AUTO" : "MANUAL — the clutch slider is yours; no launch assist")
             flush(stdout)
         end
@@ -11084,6 +11145,98 @@ function main()
                         if !_refuse
                         RaceAI.set_classic_lateral!(cr, c1, c2)
 
+                        if get(ENV, "JM_AI_REFRAME", "1") != "0" && AILINE !== nothing
+                            let L = AILINE, n = length(AILINE.x), RF_B = parse(Float64, get(ENV, "JM_AI_REFRAME_B", "0.5")), RF_H = 40.0, RF_R = parse(Float64, get(ENV, "JM_AI_REFRAME_R", "250"))
+                                local rf_b, rf_w, rf_bad, rf_Gp, rf_x, rf_z, rf_th, rf_L2, rf_rl, rf_mx, rf_rg, rf_nrec, rf_tab, rf_raw, rf_k, rf_kc, rf_dsk,
+                                      rf_km, rf_kp, rf_d, rf_i, rf_u, rf_t, rf_q, rf_si, rf_wi, rf_P0, rf_P1, rf_Nx, rf_Nz, rf_nl, rf_W, rf_new, rf_og, rf_C0, rf_C1,
+                                      rf_ONx, rf_ONz, rf_onl, rf_kap, rf_a, rf_c, rf_cr, rf_dd, rf_ga
+                                rf_b = zeros(n)
+                                for k in 1:n
+                                    rf_km = mod1(k - 3, n); rf_kp = mod1(k + 3, n)
+                                    rf_cr = (L.x[k] - L.x[rf_km])*(L.z[rf_kp] - L.z[k]) - (L.z[k] - L.z[rf_km])*(L.x[rf_kp] - L.x[k])
+                                    rf_dd = hypot(L.x[k] - L.x[rf_km], L.z[k] - L.z[rf_km])*hypot(L.x[rf_kp] - L.x[k], L.z[rf_kp] - L.z[k])*hypot(L.x[rf_kp] - L.x[rf_km], L.z[rf_kp] - L.z[rf_km])
+                                    rf_kc = rf_dd > 1e-9 ? 2rf_cr/rf_dd : 0.0
+                                    rf_b[k] = abs(something(RaceAI.classic_racelane(L, L.s[k]), 0.0)*rf_kc)
+                                end
+                                rf_bad = findall(>(RF_B), rf_b)
+                                if !isempty(rf_bad)
+                                    rf_w = zeros(n)
+                                    for k in 1:n, j in rf_bad
+                                        rf_d = abs(L.s[k] - L.s[j]); rf_d = min(rf_d, L.total - rf_d)
+                                        rf_w[k] = max(rf_w[k], rf_d <= RF_H ? 1.0 : rf_d <= RF_H + RF_R ? 0.5 + 0.5cos(pi*(rf_d - RF_H)/RF_R) : 0.0)
+                                    end
+                                    rf_nrec = length(gr)
+                                    rf_Gp = [classic_world(gr[i], i) for i in 1:rf_nrec]
+
+                                    function rf_ga(s)
+                                        local rf_u, rf_i, rf_t, rf_q
+                                        rf_u = mod(s, L.total)/L.total*rf_nrec; rf_i = floor(Int, rf_u); rf_t = rf_u - rf_i; rf_i = mod(rf_i, rf_nrec) + 1
+                                        rf_q = (rf_Gp[mod1(rf_i - 1, rf_nrec)], rf_Gp[rf_i], rf_Gp[mod1(rf_i + 1, rf_nrec)], rf_Gp[mod1(rf_i + 2, rf_nrec)])
+                                        ntuple(a -> 0.5*((2rf_q[2][a]) + (-rf_q[1][a] + rf_q[3][a])*rf_t + (2rf_q[1][a] - 5rf_q[2][a] + 4rf_q[3][a] - rf_q[4][a])*rf_t^2 +
+                                                         (-rf_q[1][a] + 3rf_q[2][a] - 3rf_q[3][a] + rf_q[4][a])*rf_t^3), 2)
+                                    end
+                                    rf_x = copy(L.x); rf_z = copy(L.z); rf_mx = 0.0
+                                    for k in 1:n
+                                        rf_w[k] > 0 || continue
+                                        rf_q = rf_ga(L.s[k])
+                                        rf_x[k] = (1 - rf_w[k])*L.x[k] + rf_w[k]*rf_q[1]; rf_z[k] = (1 - rf_w[k])*L.z[k] + rf_w[k]*rf_q[2]
+                                        rf_mx = max(rf_mx, hypot(rf_x[k] - L.x[k], rf_z[k] - L.z[k]))
+                                    end
+                                    rf_th = copy(L.θ)
+                                    for k in 1:n
+                                        rf_w[k] > 0 || continue
+                                        rf_km = mod1(k - 1, n); rf_kp = mod1(k + 1, n)
+                                        rf_th[k] = atan(rf_z[rf_kp] - rf_z[rf_km], rf_x[rf_kp] - rf_x[rf_km])
+                                    end
+                                    rf_L2 = RaceAI.AILine(rf_x, rf_z, L.y, L.s, rf_th, copy(L.κ), copy(L.rl), L.total)
+
+                                    for (rf_tab, rf_raw) in ((cr, gr), (c1, g1), (c2, g2),
+                                                            (bnd_lo, bnd_lo === nothing ? nothing : Float64.(CLASSICLP.read_lp(lpmn).dlat)),
+                                                            (bnd_hi, bnd_hi === nothing ? nothing : Float64.(CLASSICLP.read_lp(lpmx).dlat)))
+                                        rf_tab === nothing && continue
+                                        for i in eachindex(rf_tab)
+                                            rf_si = (i - 1)/length(rf_tab)*L.total
+                                            rf_wi = rf_w[clamp(searchsortedlast(L.s, rf_si), 1, n)]
+                                            rf_wi > 0 || continue
+                                            rf_W = classic_world(rf_raw[i], i)
+                                            rf_P0 = RaceAI.pose_at(rf_L2, rf_si, 0.0); rf_P1 = RaceAI.pose_at(rf_L2, rf_si, 1.0)
+                                            rf_Nx = rf_P1[1] - rf_P0[1]; rf_Nz = rf_P1[3] - rf_P0[3]; rf_nl = max(hypot(rf_Nx, rf_Nz), 1e-9)
+                                            rf_new = ((rf_W[1] - rf_P0[1])*rf_Nx + (rf_W[2] - rf_P0[3])*rf_Nz)/rf_nl
+                                            rf_C0 = RaceAI.pose_at(L, rf_si, 0.0); rf_C1 = RaceAI.pose_at(L, rf_si, 1.0)
+                                            rf_ONx = rf_C1[1] - rf_C0[1]; rf_ONz = rf_C1[3] - rf_C0[3]; rf_onl = max(hypot(rf_ONx, rf_ONz), 1e-9)
+                                            rf_og = ((rf_W[1] - rf_C0[1])*rf_ONx + (rf_W[2] - rf_C0[3])*rf_ONz)/rf_onl
+                                            rf_tab[i] = rf_new + (1 - rf_wi)*(rf_tab[i] - rf_og)
+                                        end
+                                    end
+                                    RaceAI.set_classic_lateral!(cr, c1, c2)
+
+                                    for k in 1:n
+                                        rf_L2.rl[k] = (1 - rf_w[k])*L.rl[k]
+                                    end
+
+                                    for k in 1:n
+                                        rf_w[k] > 0 || continue
+                                        rf_a = RaceAI.pose_at(rf_L2, L.s[k] - 5.0, RaceAI.racelane(rf_L2, L.s[k] - 5.0))
+                                        rf_q = RaceAI.pose_at(rf_L2, L.s[k], RaceAI.racelane(rf_L2, L.s[k]))
+                                        rf_c = RaceAI.pose_at(rf_L2, L.s[k] + 5.0, RaceAI.racelane(rf_L2, L.s[k] + 5.0))
+                                        rf_cr = (rf_q[1] - rf_a[1])*(rf_c[3] - rf_q[3]) - (rf_q[3] - rf_a[3])*(rf_c[1] - rf_q[1])
+                                        rf_dd = hypot(rf_q[1] - rf_a[1], rf_q[3] - rf_a[3])*hypot(rf_c[1] - rf_q[1], rf_c[3] - rf_q[3])*hypot(rf_c[1] - rf_a[1], rf_c[3] - rf_a[3])
+                                        rf_kap = rf_dd > 1e-9 ? abs(2rf_cr/rf_dd) : 0.0
+                                        rf_L2.κ[k] = (1 - rf_w[k])*L.κ[k] + rf_w[k]*rf_kap
+                                    end
+                                    AILINE = rf_L2
+                                    rf_rg = Tuple{Int,Int}[]
+                                    for k in findall(>(0), rf_w); (!isempty(rf_rg) && k - rf_rg[end][2] <= 2) ? (rf_rg[end] = (rf_rg[end][1], k)) : push!(rf_rg, (k, k)); end
+                                    println("  [ailine] reframe: ", length(rf_bad), " nodes with |race lane x centreline kappa| > ", RF_B, " (max ",
+                                            round(maximum(rf_b), digits = 2), " at s ", round(Int, L.s[argmax(rf_b)]), "); the AI's frame moved onto Classic's race line on s ",
+                                            join((string(round(Int, L.s[a]), "-", round(Int, L.s[b])) for (a, b) in rf_rg), ", "), ", up to ", round(rf_mx, digits = 1),
+                                            " m (JM_AI_REFRAME=0: off)")
+                                else
+                                    println("  [ailine] reframe: none needed (max |race lane x centreline kappa| ", round(maximum(rf_b), digits = 2), " <= ", RF_B, ")")
+                                end
+                            end
+                        end
+
                         if get(ENV, "JM_RAI_DEKINK", "1") != "0"
                             let st = 2.0
                                 local ns_, P_, C_, Nn_, R_, kap_, jog_, w_, corr_, nrec_, hd_, sh_, s, q, q0, q1, a, b, c, cr_, d, dh, js, dk, sx, sz, p_, qx, qz, P
@@ -11134,7 +11287,7 @@ function main()
                                 pts = Tuple{Float64,Int,Float64,Float64}[]
 
                                 local rl, q, loc, w, g, d, wrong, edge, sg, glat, fi, same, runs_, kk_au, pp_au, a1_au, b1_au, a2_au, b2_au, a3_au, b3_au,
-                                      cr_au, d1_au, d2_au, d3_au, kp_au, ed_au, rl_e, q_e, nx_e, nz_e, g0_e, hi_e, nm_e, sd_e, bd_e
+                                      cr_au, d1_au, d2_au, d3_au, kp_au, ed_au, dmp_ab, g_d, r_d, q_d, m_d, p_d, c_d, k_d, rl_e, q_e, nx_e, nz_e, g0_e, hi_e, nm_e, sd_e, bd_e
                                 for s in 0.0:st:AILINE.total - st
                                     rl = something(RaceAI.classic_racelane(AILINE, s), RaceAI.racelane(AILINE, s))
                                     q = RaceAI.pose_at(AILINE, s, rl); loc = classicw_locate_any(q[1], q[3]); loc === nothing && continue
@@ -11172,6 +11325,19 @@ function main()
                                     cr_au = (a2_au - a1_au)*(b3_au - b2_au) - (b2_au - b1_au)*(a3_au - a2_au); d1_au = hypot(a2_au - a1_au, b2_au - b1_au); d2_au = hypot(a3_au - a2_au, b3_au - b2_au); d3_au = hypot(a3_au - a1_au, b3_au - b1_au)
                                     kp_au = (d1_au*d2_au*d3_au > 1e-6) ? 2cr_au/(d1_au*d2_au*d3_au) : 0.0
                                     abs(kp_au) > 0.03 && push!(kk_au, (s, abs(kp_au)))
+                                end
+
+                                if haskey(ENV, "JM_AILINE_DUMP")
+                                    dmp_ab = parse.(Float64, split(ENV["JM_AILINE_DUMP"], ":"))
+                                    for s in dmp_ab[1]:1.0:dmp_ab[2]
+                                        g_d = RaceAI.classic_racelane(AILINE, s); r_d = RaceAI.racelane(AILINE, s); q_d = pp_au(s)
+                                        m_d = pp_au(s - 5.0); p_d = pp_au(s + 5.0)
+                                        c_d = (q_d[1] - m_d[1])*(p_d[2] - q_d[2]) - (q_d[2] - m_d[2])*(p_d[1] - q_d[1])
+                                        k_d = 2c_d/max(hypot(q_d[1] - m_d[1], q_d[2] - m_d[2])*hypot(p_d[1] - q_d[1], p_d[2] - q_d[2])*hypot(p_d[1] - m_d[1], p_d[2] - m_d[2]), 1e-9)
+                                        println("  [aidump] s ", s, " classic ", g_d === nothing ? "-" : round(g_d, digits = 2), " own ", round(r_d, digits = 2),
+                                                " x ", round(q_d[1], digits = 2), " z ", round(q_d[2], digits = 2), " k ", round(k_d, digits = 3),
+                                                " lineK ", round(RaceAI.curv_at(AILINE, s), digits = 3), " band ", RaceAI.classic_band(AILINE, s; margin = RaceAI.BAND_MARGIN))
+                                    end
                                 end
 
                                 for (nm_e, sd_e) in (("race line", 0), ("pass1 rail", 1), ("pass2 rail", -1), ("band's low edge", 2), ("band's high edge", 3))
@@ -12472,7 +12638,8 @@ function main()
         "# run: ai=$(N_AI_REQ) ai_pct=$(AI_PCT) ai_rel=$(AI_REL) ai_amax=$(AI_AMAX) view=$(_tview) joystick=$(_tjoy)\n" *
         "# t\tlap\tlapdist\tkmh\tthr\tbrk\tsteer\tclu\tgear\trpm\tx\tz\tlat\talong\tontrack\n")
     println("\n  Drive:  W/S gas·brake   A/D steer   E/Q shift   C clutch   R restart race   ⇧R recover-to-track   V view   G auto⇄manual   M mute   F band on/off   Esc quit"); flush(stdout)
-    println("  AUTO gearbox by default — just press the throttle and go (no clutch needed).  Press G for")
+    println("  Gearbox: ", CTL.auto ? "AUTO (the launcher's setting) -- just press the throttle and go (no clutch needed).  Press G for" :
+                                      "MANUAL (the launcher's setting).  Press G for AUTO; in")
     println("  MANUAL: hold the clutch (C / stick button) to shift E/Q (release it too low and it bogs).")
     println("  Lap times top-left: white = last, green = best.  Telemetry → ./$(TRACKSEL)_racer_*.txt")
     println("  (Logitech joystick works natively — push=throttle, pull=brake, roll=steer)\n")
@@ -12803,10 +12970,12 @@ function main()
 
         HUD_UNDER_BAND || hud_draw_step!(cs, inp, tc_hud, last_lap, best_lap, cd_armed, cd_left, race_go, phase, race_done, player_finpos, HOLD_START)
         wreck_notice_draw!(W, H, REPLAY)
+        gear_notice_draw!(W, H, REPLAY)
         ai_style_notice_draw!(W, H, cs.t, length(AICARS))
         REPLAY || yellow_flag_draw!(Float64(cs.t), W, H)
         REPLAY || pit_notice_draw!(W, H, Float64(cs.t))
         CLUTCH_GATE[] > 0 && (CLUTCH_GATE[] -= dt)
+        GEAR_MSG[] > 0 && (GEAR_MSG[] -= dt)
 
         FRAMEPROF > 0 && (PROF_HUD[] += time() - _t_hud)
         frameprof_report!()
@@ -12864,7 +13033,16 @@ function main()
 
     if WARM_HOLD
         wp = warm_hold(replay_names)
-        if wp !== nothing
+        if wp === :race
+            instant_replay_reset!(); gearbox_restore!()
+            REPLAY_FILE_R[] = ""; INSTANT_AT_END[] = false
+            println("  [warm] race: the next session on ", TRACKSEL, " in this process -- the setup installed again"); flush(stdout)
+            reload_controller!()
+            apply_session_setup!()
+            GLFW.ShowWindow(win); go_fullscreen!()
+            tstamp("  [warm] main() again, as a race")
+            return :race
+        elseif wp !== nothing
             instant_replay_reset!()
             REPLAY_FILE_R[] = wp; INSTANT_AT_END[] = false
             println("  [instant] replaying this session in this process: ", basename(wp)); flush(stdout)
@@ -12896,4 +13074,4 @@ else
     Core.eval(Main, _MAIN_Q)
 end
 get(ENV, "JM_CHECK_DIAG", "0") == "1" && (check_diag_globals() || exit(1))
-while main() === :replay; end
+while main() in (:replay, :race); end

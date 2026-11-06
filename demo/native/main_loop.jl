@@ -297,6 +297,19 @@ function pit_notice_draw!(W, H, t::Float64)
     nothing
 end
 
+"""TD261105-1: a gearbox mode change (the stall's drop to AUTO, G, a restart's restore), centred for GEAR_MSG seconds.
+Not over a wreck notice (that one says what the keys do)."""
+function gear_notice_draw!(W, H, REPLAY)
+    (GEAR_MSG[] <= 0 || REPLAY || WRECKED[] || FONT === nothing) && return nothing
+    m = GEAR_MSG_TXT[]; isempty(m) && return nothing
+    my = band_msg_y(H, H*0.30); bw = Render.text_width(FONT, m) + 40
+    bx = empty!(HUD_TY); Render.hquad!(bx, W/2 - bw/2, my - 14, bw, FONT.lineh + 28, (0.06, 0.06, 0.08))
+    Render.hud_draw(hudprog, hudvao, hudvbo, bx, W, H)
+    tt = empty!(HUD_TYT); Render.text!(tt, FONT, W/2 - Render.text_width(FONT, m)/2, my, m, (1.0, 0.82, 0.25))
+    Render.text_draw(textprog, textvao, textvbo, FONT, tt, W, H)
+    nothing
+end
+
 """TD261013-1 (c3): say on screen that a wreck refuses shifts and throttle, with the way out. (LOOPSPLIT-1 S5: moved unchanged from main())"""
 function wreck_notice_draw!(W, H, REPLAY)
         if WRECKED[] && !REPLAY && FONT !== nothing && get(ENV, "JM_WRECK_NOTICE", "1") != "0"
@@ -526,6 +539,7 @@ function restart_session!(cs, cs0, groundz, groundz_phys, AICARS, AILINE, CLINE,
     WRECKED[] = false; WRECK_FROZEN[] = false; AIRBORNE[] = false; empty!(LOOSE_WHEELS)
     CLUTCH_GATE[] = -1.0
     TELLTALE[] = 0.0
+    gearbox_restore!()
     empty!(AI_COOL); empty!(RAI_COOL); empty!(RAI_PITH); rai_nosnap_reset!()
 
     cs.laps = 0; lap_t0 = cs.t; last_lap = 0.0; best_lap = 0.0; prev_laps = 0
@@ -1325,6 +1339,7 @@ function respawn_step!(cs, cs0, groundz, groundz_phys, PLAYER_G)
     groundz(cs0.x, cs0.z; acquire = true)
     PLAYER_G[] = NaN; respawnX!(cs; groundz=groundz_phys); DriveRT3D.damage_reset!(); DC[].lastz = 0.0
     WRECKED[] = false; WRECK_FROZEN[] = false; AIRBORNE[] = false; empty!(LOOSE_WHEELS); CLUTCH_GATE[] = -1.0
+    gearbox_restore!()
 
     nothing
 end
@@ -2043,8 +2058,12 @@ function player_step3d!(cs, dt, rst, inp, groundz, ffb_jolt, groundz_phys, race_
         STALL_T[], _stallfire = DriveRT3D.stall_step(STALL_T[], dt;
             auto = CTL.auto, wrecked = WRECKED[], rpm = cs.rpm, clutch = CLU_NOW[],
             rpm_floor = STALL_RPM, secs = STALL_SECS, speed = abs(cs.v), vmax = 5.0)
+        if STALL_AT >= 0 && !STALL_AT_DONE[] && !CTL.auto && cs.t >= STALL_AT
+            STALL_AT_DONE[] = true; _stallfire = true
+        end
         if _stallfire
             CTL.auto = true
+            gearbox_notice!("ENGINE STALLED -- switched to AUTO mode.   Hold the clutch and press G to return to MANUAL", 8.0)
             println("  [gearbox] ENGINE STALLED (", round(Int, cs.rpm),
                     " rpm, clutch engaged) -- switched to AUTO")
             flush(stdout)
