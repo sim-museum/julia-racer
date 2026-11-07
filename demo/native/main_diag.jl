@@ -624,29 +624,34 @@ end
 """ALLOCSITES: the frame's allocation sites (LOOPSPLIT-1 cycle 3 S5: moved unchanged from the frame loop)."""
 function allocsites_report!(cs, frames)
     if ALLOCSITES
-        if frames == 300
-            @eval Main using Profile; Base.invokelatest(() -> (Profile.Allocs.clear(); Profile.Allocs.start(sample_rate = 0.02)))
-        elseif frames == 600
-            Base.invokelatest() do
-                Profile.Allocs.stop(); r = Profile.Allocs.fetch()
-                cnt = Dict{String,Tuple{Int,Int}}()
-                for a in r.allocs
-                    site = "?"
-                    for fr in a.stacktrace
-                        f = string(fr.file)
-                        (occursin("drive_native_mtk", f) || occursin("main_loop", f) || occursin("render.jl", f) || occursin("ai.jl", f) || occursin("drive_rt", f)) || continue
-                        site = string(basename(f), ":", fr.line, " ", fr.func); break
-                    end
-                    c = get(cnt, site, (0, 0)); cnt[site] = (c[1] + 1, c[2] + a.size)
-                end
-                println("  [allocsites] top sites (sampled 2%, frames 300-600):")
-                for (k, v) in sort(collect(cnt), by = x -> -x[2][2])[1:min(end, 25)]
-                    println("     ", lpad(round(Int, v[2]/0.02/300/1024), 6), " KB/frame  ", lpad(v[1], 6), " samples  ", k)
-                end
-                flush(stdout)
-            end
+        if frames == ALLOCSITES_AT
+
+            @eval Main using Profile; Base.invokelatest(precompile, _allocsites_print, ())
+            Base.invokelatest(() -> (Profile.Allocs.clear(); Profile.Allocs.start(sample_rate = 0.02)))
+        elseif frames == ALLOCSITES_AT + 300
+            Base.invokelatest(_allocsites_print)
         end
     end
+    nothing
+end
+function _allocsites_print()
+        Profile.Allocs.stop(); r = Profile.Allocs.fetch()
+        cnt = Dict{String,Tuple{Int,Int}}()
+        for a in r.allocs
+            site = "?"
+            for fr in a.stacktrace
+                f = string(fr.file)
+                (occursin("drive_native_mtk", f) || occursin("main_loop", f) || occursin("render.jl", f) || occursin("ai.jl", f) || occursin("drive_rt", f) ||
+                 occursin("JRTrack", f) || occursin("classictrack", f) || occursin("hud_band", f)) || continue
+                site = string(basename(f), ":", fr.line, " ", fr.func); break
+            end
+            c = get(cnt, site, (0, 0)); cnt[site] = (c[1] + 1, c[2] + a.size)
+        end
+        println("  [allocsites] top sites (sampled 2%, frames ", ALLOCSITES_AT, "-", ALLOCSITES_AT + 300, "):")
+        for (k, v) in sort(collect(cnt), by = x -> -x[2][2])[1:min(end, 25)]
+            println("     ", lpad(round(Int, v[2]/0.02/300/1024), 6), " KB/frame  ", lpad(v[1], 6), " samples  ", k)
+        end
+        flush(stdout)
     nothing
 end
 

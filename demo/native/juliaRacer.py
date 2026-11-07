@@ -113,6 +113,8 @@ CONTROLS = [
     ("Automatic / manual gearbox", "G"),
     ("Change view (cockpit, chase, ...)", "V"),
     ("Hide / show the top band (full-screen 3D)", "F"),
+    ("Map zoom: whole track / medium / close up", "Z"),
+    ("AI drives your car (3 s count-down) / take it back", "P"),
     ("Restart the race", "R"),
     ("Mute the engine", "M"),
     ("Leave the session", "Esc"),
@@ -248,6 +250,8 @@ class JoyMap:
         self.clutch = Ctrl(0, 0.0, 1.0)
         self.up_btn, self.dn_btn, self.clutch_btn = 1, 2, 3
         self.fullscreen_btn = 0
+        self.map_btn = 0
+        self.aidrive_btn = 0
         self.deadzone = 0.06
         self.wheel_half_deg = 0.0
 
@@ -282,6 +286,10 @@ class JoyMap:
             f.write(f"clutch_btn {self.clutch_btn}\ndeadzone {self.deadzone}\n")
             if self.fullscreen_btn > 0:
                 f.write(f"fullscreen_btn {self.fullscreen_btn}\n")
+            if self.map_btn > 0:
+                f.write(f"map_btn {self.map_btn}\n")
+            if self.aidrive_btn > 0:
+                f.write(f"aidrive_btn {self.aidrive_btn}\n")
             if self.wheel_half_deg > 0:
                 f.write(f"wheel_half_deg {self.wheel_half_deg}\n")
 
@@ -311,6 +319,8 @@ class JoyMap:
         m.dn_btn = round(d.get("dn_btn", m.dn_btn))
         m.clutch_btn = round(d.get("clutch_btn", m.clutch_btn))
         m.fullscreen_btn = round(d.get("fullscreen_btn", 0))
+        m.map_btn = round(d.get("map_btn", 0))
+        m.aidrive_btn = round(d.get("aidrive_btn", 0))
         m.deadzone = d.get("deadzone", m.deadzone)
         m.wheel_half_deg = d.get("wheel_half_deg", 0.0)
         return m
@@ -564,6 +574,10 @@ STEPS = [
     ("dn", "Step 9 — Press the SHIFT-DOWN paddle/button."),
     ("fs", "Step 10 — Press the button that will show/hide the control BAND during a race (the 3D view full screen, "
            "like the F key) — or Skip."),
+    ("map", "Step 11 — Press the button that will cycle the MAP's zoom during a race (whole track, medium, close up; "
+            "like the Z key) — or Skip."),
+    ("aidrive", "Step 12 — Press the button that will hand your car to the AI driver and back during a race (a 3 s count-down "
+                "before the AI takes over; like the P key) — or Skip."),
     ("done", "Done — review the live preview below, then Save."),
 ]
 STEP = {k: i for i, (k, _) in enumerate(STEPS)}
@@ -757,7 +771,7 @@ class CalibrateTab(QWidget):
             for i, lab in enumerate(getattr(self, "axis_labels", [])):
                 k = self.sweep.kind(i) if i < len(self.sweep.centre) else None
                 lab.setText(f"axis {i + 1}" + (f" · {k}" if k else ""))
-        if key in ("up", "dn", "clutch_btn", "fs"):
+        if key in ("up", "dn", "clutch_btn", "fs", "map", "aidrive"):
             self._auto_button()
         elif key in ("steer", "throttle", "brake", "clutch"):
             self._auto_axis()
@@ -838,11 +852,11 @@ class CalibrateTab(QWidget):
         self.cap_b.setVisible(key in ("rest", "sweep", "wheel90"))
         self.cap_b.setEnabled(key in ("rest", "sweep", "wheel90"))
         self.alt_b.setVisible(key == "clutch")
-        self.skip_b.setVisible(key in ("clutch", "wheel90", "fs"))
-        self.skip_b.setText("Skip" if key in ("wheel90", "fs") else "No clutch")
+        self.skip_b.setVisible(key in ("clutch", "wheel90", "fs", "map", "aidrive"))
+        self.skip_b.setText("Skip" if key in ("wheel90", "fs", "map", "aidrive") else "No clutch")
         self.start_b.setText("Restart" if key != "idle" else "Start")
 
-        self._btn_armed = key not in ("up", "dn", "clutch_btn", "fs")
+        self._btn_armed = key not in ("up", "dn", "clutch_btn", "fs", "map", "aidrive")
         self._btn_held = set()
         self._ax_armed = False; self._still = 0
         if key == "done":
@@ -880,6 +894,12 @@ class CalibrateTab(QWidget):
     def skip(self):
         if STEPS[self.step][0] == "fs":
             self.work.fullscreen_btn = 0
+            self._goto("map")
+        elif STEPS[self.step][0] == "map":
+            self.work.map_btn = 0
+            self._goto("aidrive")
+        elif STEPS[self.step][0] == "aidrive":
+            self.work.aidrive_btn = 0
             self._goto("done")
         elif STEPS[self.step][0] == "wheel90":
             self.work.wheel_half_deg = 0.0
@@ -991,6 +1011,14 @@ class CalibrateTab(QWidget):
                 elif key == "fs":
                     self.work.fullscreen_btn = i + 1
                     self.capl.setText(f"Band on/off button = {i + 1}")
+                    self._goto("map")
+                elif key == "map":
+                    self.work.map_btn = i + 1
+                    self.capl.setText(f"Map zoom button = {i + 1}")
+                    self._goto("aidrive")
+                elif key == "aidrive":
+                    self.work.aidrive_btn = i + 1
+                    self.capl.setText(f"AI driver button = {i + 1}")
                     self._goto("done")
                 return
 
@@ -1008,7 +1036,7 @@ class CalibrateTab(QWidget):
         m = self.work
         c = (f"steer ax{m.steer.axis}  thr ax{m.throttle.axis}  brk ax{m.brake.axis}  "
              f"clutch {'ax'+str(m.clutch.axis) if m.clutch.axis else ('btn'+str(m.clutch_btn) if m.clutch_btn else 'none')}  "
-             f"up b{m.up_btn} dn b{m.dn_btn}" + (f"  band b{m.fullscreen_btn}" if m.fullscreen_btn else ""))
+             f"up b{m.up_btn} dn b{m.dn_btn}" + (f"  band b{m.fullscreen_btn}" if m.fullscreen_btn else "") + (f"  map b{m.map_btn}" if m.map_btn else "") + (f"  AI b{m.aidrive_btn}" if m.aidrive_btn else ""))
         return c
 
     def save(self):

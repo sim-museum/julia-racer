@@ -384,7 +384,7 @@ end
 function yellow_flag_draw!(t::Float64, W, H)
     band_flag_shown(t) && return nothing
     meatball_on(t) && return flag_draw!(:meatball, t, W, H)
-    yellow_on(t) || return nothing
-    flag_draw!(:yellow, t, W, H)
+    yellow_on(t) && return flag_draw!(:yellow, t, W, H)
+    blue_on(t) && flag_draw!(:blue, t, W, H)
     nothing
 end
