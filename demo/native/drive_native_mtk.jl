@@ -410,6 +410,12 @@ const RAI_CLOCK = Ref(0.0); const RAI_TOTAL = Ref(1.0)
 const RAI_PROXDIAG = get(ENV, "JM_RAI_PROXDIAG", "0") != "0"; const RAI_PROX = Ref(Inf)
 const RAI_SNAPDIAG = get(ENV, "JM_RAI_SNAPDIAG", "0") != "0"
 const RAI_HIST = Vector{NTuple{8,Float64}}[]
+
+const RAI_REPAIR_ON = get(ENV, "JM_RAI_REPAIR", "1") != "0"
+const RAI_LIMP_MS = parse(Float64, get(ENV, "JM_RAI_LIMP_MS", "8.0")); const RAI_LIMP_PACE = parse(Float64, get(ENV, "JM_RAI_LIMP_PACE", "0.6"))
+const RAI_SERVICE_S = parse(Float64, get(ENV, "JM_RAI_SERVICE_S", "8.0"))
+const RAI_REPAIR = Dict{Int,Tuple{Symbol,Float64}}()
+const RAI_DMGT = Dict{Tuple{Int,Int},Float64}()
 const RAI_FOLLOW_REACH = get(ENV, "JM_RAI_FOLLOW_REACH", "1") != "0"
 const RAI_PASS_REACH = get(ENV, "JM_RAI_PASS_REACH", "1") != "0"
 const RAI_SLOWPASS_CAP = get(ENV, "JM_RAI_SLOWPASS_CAP", "1") != "0"
@@ -439,12 +445,15 @@ const RAI_RESEAT_PACE = parse(Float64, get(ENV, "JM_RAI_RESEAT_PACE", "0.6"))
 
 const RAI_NOSNAP = get(ENV, "JM_RAI_NOSNAP", "1") != "0"
 const RAI_CLASSICFLOOR = get(ENV, "JM_RAI_CLASSICFLOOR", "1") != "0"; const RAI_CLASSICFLOOR_LOG = Ref(true)
+const RAI_CLASSICFLOOR_EDGE = get(ENV, "JM_RAI_CLASSICFLOOR_EDGE", "1") != "0"
 const RAI_OFFHAT = Dict{Int,Int}()
 const RAI_WALLT = Dict{Int,Float64}()
 const RAI_NOSNAP_UPSET = get(ENV, "JM_RAI_NOSNAP_UPSET", "1") != "0"
 const RAI_OFFROAD_V = parse(Float64, get(ENV, "JM_RAI_OFFROAD_V", "15.0"))
 const RAI_SPIN_AT = (_v = split(get(ENV, "JM_RAI_SPIN_AT", "0:0"), ':'); (parse(Float64, _v[1]), parse(Int, _v[2])))
 const RAI_SPIN_DONE = Ref(false)
+const RAI_DMG_AT = (_w = split(get(ENV, "JM_RAI_DMG_AT", "0:0:0"), ':'); (parse(Float64, _w[1]), parse(Int, _w[2]), parse(Float64, _w[3])))
+const RAI_DMG_DONE = Ref(false)
 const RAI_RETIRE_S = parse(Float64, get(ENV, "JM_RAI_RETIRE_S", "15.0")); const RAI_REMOVE_S = parse(Float64, get(ENV, "JM_RAI_REMOVE_S", "6.0"))
 const RAI_REC = Dict{Int,Float64}()
 const RAI_PROGT = Dict{Int,Tuple{Float64,Float64}}()
@@ -454,7 +463,7 @@ const RAI_GONE = Set{Int}()
 const RAI_SPINREC = Dict{Int,Tuple{Symbol,Float64,Float64}}()
 const RAI_SPINREC_ON = get(ENV, "JM_RAI_SPINREC", "1") != "0"
 const RAI_SPINREC_IN = deg2rad(parse(Float64, get(ENV, "JM_RAI_SPINREC_DEG", "100"))); const RAI_SPINREC_OUT = deg2rad(35.0)
-rai_nosnap_reset!() = (empty!(RAI_OFFHAT); empty!(RAI_ABS); empty!(RAI_SPINREC); RAI_SPIN_DONE[] = false; empty!(RAI_CLASSICW); empty!(RAI_WALLT); empty!(RAI_REC); empty!(RAI_PROGT); empty!(RAI_OUT); empty!(RAI_GONE); nothing)
+rai_nosnap_reset!() = (empty!(RAI_OFFHAT); empty!(RAI_ABS); empty!(RAI_REPAIR); empty!(RAI_DMGT); RAI_DMG_DONE[] = false; empty!(RAI_SPINREC); RAI_SPIN_DONE[] = false; empty!(RAI_CLASSICW); empty!(RAI_WALLT); empty!(RAI_REC); empty!(RAI_PROGT); empty!(RAI_OUT); empty!(RAI_GONE); nothing)
 const AI_GRID_LEVEL = get(ENV, "JM_AI_GRID_LEVEL", "0") != "0"
 const RAI_HDIAG = get(ENV, "JM_RAI_HDIAG", "0") != "0"; const RAI_HLAST = Dict{Int,Float64}()
 const RAI_RESEAT = get(ENV, "JM_RAI_RESEAT", "1") != "0"
@@ -1255,7 +1264,7 @@ const AUTODRIVE_TRAFFIC = get(ENV, "JM_AUTODRIVE_TRAFFIC", "0") != "0"
 const AD_TRAFFIC = Ref(NTuple{3,Float64}[])
 
 const ADRIVE_ON = Ref(false); const ADRIVE_AT = Ref(-1.0); const ADRIVE_PK = Ref(false); const ADRIVE_BTN_HIT = Ref(false)
-const ADRIVE_PACE = parse(Float64, get(ENV, "JM_AIDRIVE_PACE", "0.85"))
+const ADRIVE_PACE = parse(Float64, get(ENV, "JM_AIDRIVE_PACE", "0.75"))
 const AUTODRIVE_PROF_PACE = parse(Float64, get(ENV, "JM_AUTODRIVE_PROFILE", "0"))
 const AUTODRIVE_PROF = Ref{Any}(nothing)
 const GROUND_LAT_SMOOTH = get(ENV, "JM_GROUND_LAT_SMOOTH", "0") != "0"
@@ -5743,6 +5752,7 @@ lapfmt(t) = t <= 0 ? "--:--.--" : begin
     m = floor(Int, t/60); sr = t - 60m; sec = floor(Int, sr); cc = clamp(floor(Int, (sr - sec)*100), 0, 99)
     string(lpad(m, 2, '0'), ":", lpad(sec, 2, '0'), ".", lpad(cc, 2, '0')) end
 include(joinpath(@__DIR__, "hud_timing.jl"))
+include(joinpath(@__DIR__, "incidents.jl"))
 include(joinpath(@__DIR__, "hud_band.jl"))
 include(joinpath(@__DIR__, "tyre_temp.jl"))
 depthprog = Render.depthprogram(); (shadowfbo, shadowtex) = Render.make_shadow_fbo()
@@ -12781,6 +12791,7 @@ function main()
         _ik = took_key!(GLFW.KEY_I) | key(GLFW.KEY_I); _lk = took_key!(GLFW.KEY_LEFT)
 
         (race_go[] && cs.v < 0.5) ? (STOP_T[] < 0 && (STOP_T[] = cs.t)) : (STOP_T[] = -1.0)
+        INC_LIVE[] = IS_RACE && race_go[] && !race_done && !REPLAY
         _stopped = STOP_T[] >= 0 && cs.t - STOP_T[] >= 1.0
         (_ik && !IPRESS_SEEN[]) && (println("  [instant] I pressed at t=", round(cs.t, digits = 2), ": race over ", race_done, ", wrecked ", WRECKED[],
                                             ", stopped ", _stopped, ", recording ", REPLAY_REC, ", instant replay on ", INSTANT_ON); flush(stdout)); IPRESS_SEEN[] = _ik
@@ -12965,6 +12976,7 @@ function main()
         ai_poses = ai_poses_post(cs, dt, ai_poses, AICARS, REPLAY, ai_poses_prev, CLASSICAI_T)
         (!REPLAY && !isempty(ai_poses)) && (yellow_step!(Float64(cs.t), Float64(cs.x), Float64(cs.z), CLASSICAI_T); ai_gone_poses!(ai_poses))
         REPLAY || pitstop_step!(cs, Float64(cs.t), CLASSICAI_T !== nothing ? CLASSICAI_T : RAI_PITT[], CLINE, FUEL_ON ? refuel! : nothing, Float64(inp.throttle))
+        REPLAY || bf_player_step!(cs, CLASSICAI_T !== nothing ? CLASSICAI_T : RAI_PITT[], CLINE)
         ai_spin_step!(ai_poses)
         spray_step!(cs, ai_poses)
 

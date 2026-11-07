@@ -271,7 +271,12 @@ function hudband_draw!(cs, W, H, AICARS, best_lap, last_lap, lap_t0, race_done, 
         pk = st0 === nothing ? 1 : something(findfirst(e -> e[1] == 0, st0), 1)
         nf = st0 === nothing ? 1 : length(st0)
         lapn = REPCLK_ON[] ? REPCLK_LAPS[] : cs.laps
-        band_rows!(bv, gtv, L.pos, (("POS:", "$pk/$nf"), ("LAPS:", "$lapn/" * (IS_RACE ? string(RACE_LAPS_R[]) : "--"))); scale = 1.0band_textscale(L.pos[4]))
+        if IS_RACE && INC_ON && isempty(REPLAY_FILE_R[])
+            band_rows!(bv, gtv, L.pos, (("POS:", "$pk/$nf"), ("LAPS:", "$lapn/" * string(RACE_LAPS_R[])), ("INC:", string(inc_points(0), "x")));
+                       scale = 0.8band_textscale(L.pos[4]))
+        else
+            band_rows!(bv, gtv, L.pos, (("POS:", "$pk/$nf"), ("LAPS:", "$lapn/" * (IS_RACE ? string(RACE_LAPS_R[]) : "--"))); scale = 1.0band_textscale(L.pos[4]))
+        end
         c = LAPCLOCK; k = c.sec_lastdone; ns = length(c.sec_best)
         cur = REPCLK_ON[] ? REPCLK_CUR[] : (race_go[] && !race_done ? cs.t - lap_t0 : NaN)
         sk = 1 <= k <= ns
@@ -383,7 +388,7 @@ function flag_draw!(kind::Symbol, t::Float64, W, H)
     for i in 0:nx-1
         ph = 2π*(1.6t - i/nx); dy = 0.05fh*sin(ph)*(i/nx); sd = 0.96 + 0.04*cos(ph)
         for j in 0:ny-1
-            c = kind === :yellow ? (0.98sd, 0.84sd, 0.08) : kind === :meatball ? (0.05, 0.05, 0.05) : kind === :blue ? (0.08, 0.30sd, 0.88sd) :
+            c = kind === :yellow ? (0.98sd, 0.84sd, 0.08) : kind === :meatball ? (0.05, 0.05, 0.05) : kind === :blue ? (0.08, 0.30sd, 0.88sd) : kind === :black ? (0.04sd, 0.04sd, 0.04sd) :
                 (kind === :white || iseven(i + j)) ? (sd, sd, sd) : (0.06, 0.06, 0.06)
             Render.hquad!(v, fx + i*sw, fy + j*sh + dy, sw + 1, sh, c)
         end
