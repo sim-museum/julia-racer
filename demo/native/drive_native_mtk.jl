@@ -61,6 +61,8 @@ const FFB_SPREV = Ref(0.0)
 
 const FFB_ARM = get(ENV, "JM_FFB_ARM", "1") != "0"
 const FFB_ARMED = Ref(false); const FFB_STEER0 = Ref(NaN); const FFB_HELD = Ref(0.0); const FFB_HELD_T = Ref(0.0)
+const FFB_ARM_OWN = get(ENV, "JM_FFB_ARM_OWN", "1") != "0"
+const DRV_PEDALS = Ref((0.0, 0.0))
 const FFB_TOUCH_ONLY = get(ENV, "JM_FFB_TOUCH_ONLY", "1") != "0"
 const FFB_SIGN   = parse(Float64, get(ENV, "JM_FFB_SIGN", "-1.0"))
 const FFB_ATRAIL = parse(Float64, get(ENV, "JM_FFB_TRAIL", "0.18"))
@@ -100,7 +102,25 @@ end
 
 const WHEEL_HALF_DEG_R = Ref(JoyCfg.wheel_half_range_deg(JOYNAME; measured = JOYMAP_R[].wheel_half_deg))
 "WARMRACE-1 S2: a warm race takes the launcher's current calibration (the steering gain follows in apply_session_setup!)."
+
+const XBTN = Dict(:map => 0, :aidrive => 0, :replay => 0); const XBTN_PREV = Dict(:map => false, :aidrive => false, :replay => false)
+function read_extra_btns!()
+    txt = isfile(_JOYCONF) ? read(_JOYCONF, String) : ""
+    for (k, ev) in ((:map, "JM_MAP_BTN"), (:aidrive, "JM_AIDRIVE_BTN"), (:replay, "JM_REPLAY_BTN"))
+        m_ = match(Regex("(?m)^" * string(k) * "_btn\\s+(\\d+)"), txt)
+        XBTN[k] = something(tryparse(Int, get(ENV, ev, "")), m_ === nothing ? 0 : parse(Int, m_[1]))
+    end
+    nothing
+end
+read_extra_btns!()
+"True once per press of extra button `k` (its rising edge in the button array `bs`)."
+function xbtn_pressed!(k::Symbol, bs)
+    b = XBTN[k]; b > 0 || return false
+    on = bs !== nothing && length(bs) >= b && bs[b] != 0
+    edge = on && !XBTN_PREV[k]; XBTN_PREV[k] = on; edge
+end
 function reload_controller!()
+    read_extra_btns!()
     m, src = JoyCfg.resolve(_JOYCONF, JOYNAME)
     m == JOYMAP_R[] && return false
     JOYMAP_R[] = m; JOYSRC_R[] = src
@@ -183,7 +203,9 @@ const ROAD_TEX = lt -> occursin("asp", lt) || startswith(lt,"groove") || startsw
                        startswith(lt,"borcem") || lt == "asfa" || lt == "griline"
 
 const MODE      = lowercase(get(ENV, "JM_MODE", "practice"))
-const RACE_LAPS = max(1, tryparse(Int, get(ENV, "JM_LAPS", "3")) |> x -> x === nothing ? 3 : x)
+
+race_laps_env() = max(1, something(tryparse(Int, get(ENV, "JM_LAPS", "3")), 3))
+const RACE_LAPS_R = Ref(race_laps_env())
 const AI_COOLDOWN = get(ENV, "JM_AI_COOLDOWN", "1") != "0"
 const AI_COOL_DIAG = get(ENV, "JM_AI_COOLDIAG", "0") != "0"
 
@@ -323,8 +345,8 @@ const RAI_AMAX_PLAN = haskey(ENV, "JM_RAI_AMAX") ? parse(Float64, ENV["JM_RAI_AM
                       RAI_PACE_OLD ? clamp(10.0*(AI_PCT/69.4)^3.2, 4.0, 13.0) : clamp(8.5*RAI_PACE_F^2, 4.0, 13.0)
 const RAI_BRAKE_PLAN = haskey(ENV, "JM_RAI_BRAKE") ? parse(Float64, ENV["JM_RAI_BRAKE"]) : clamp(0.9*RAI_AMAX_PLAN, 4.5, 12.0)
 const RAI_AMAX_STEER = parse(Float64, get(ENV, "JM_RAI_AMAX_STEER", "13.0"))
-const RAI_PROF = Ref{Union{Nothing,Tuple{Any,Vector{Float64}}}}(nothing)
-const RAI_PROF_LATE = Ref{Union{Nothing,Tuple{Any,Vector{Float64}}}}(nothing)
+const RAI_PROF = Ref{Union{Nothing,Tuple{Vector{Float64},Vector{Float64}}}}(nothing)
+const RAI_PROF_LATE = Ref{Union{Nothing,Tuple{Vector{Float64},Vector{Float64}}}}(nothing)
 const RAI_LATE = parse(Float64, get(ENV, "JM_RAI_LATE", "1.3"))
 const RAI_LANE_RATE = parse(Float64, get(ENV, "JM_RAI_LANE_RATE", "2.5"))
 const RAI_TLS = Float64[]
@@ -388,6 +410,11 @@ const RAI_CLOCK = Ref(0.0); const RAI_TOTAL = Ref(1.0)
 const RAI_PROXDIAG = get(ENV, "JM_RAI_PROXDIAG", "0") != "0"; const RAI_PROX = Ref(Inf)
 const RAI_SNAPDIAG = get(ENV, "JM_RAI_SNAPDIAG", "0") != "0"
 const RAI_HIST = Vector{NTuple{8,Float64}}[]
+const RAI_FOLLOW_REACH = get(ENV, "JM_RAI_FOLLOW_REACH", "1") != "0"
+const RAI_PASS_REACH = get(ENV, "JM_RAI_PASS_REACH", "1") != "0"
+const RAI_SLOWPASS_CAP = get(ENV, "JM_RAI_SLOWPASS_CAP", "1") != "0"
+const RAI_TARMAC = get(ENV, "JM_RAI_TARMAC", "1") != "0"
+const RAI_DUMP_AT = parse(Float64, get(ENV, "JM_RAI_DUMP_AT", "0"))
 const RAI_HIST2 = Vector{NTuple{7,Float64}}[]
 const RAI_GRIDSEAT = get(ENV, "JM_RAI_GRIDSEAT", "1") != "0"
 const RAI_ROLLDIAG = get(ENV, "JM_RAI_ROLLDIAG", "0") != "0"
@@ -395,6 +422,10 @@ const RAI_SOLID_LAUNCH = get(ENV, "JM_RAI_SOLID_LAUNCH", "0") != "0"; const RAI_
 
 const RAI_HIT_E = parse(Float64, get(ENV, "JM_RAI_HIT_E", "0.1"))
 const RAI_HIT_OUT_MS = parse(Float64, get(ENV, "JM_RAI_HIT_OUT", "20"))
+
+const ABS_ON = get(ENV, "JM_ABS_TOTAL", "1") != "0"; const ABS_ONSET_MS = parse(Float64, get(ENV, "JM_ABS_ONSET", "5.0"))
+const RAI_ABS = Dict{Int,Tuple{Float64,Int}}()
+const ABS_EP = Ref(0.0); const ABS_SUM = Ref(0.0); const ABS_N = Ref(0); const ABS_T = Ref(0.0)
 "S6: solid_hit's impulse re-sized for a physics AI -> (impulse, closing speed m/s, crash?). solid_hit's j = 1.45 x closing."
 function ai_hit_scale(ho)
     cl = hypot(ho[1], ho[2])/1.45
@@ -412,12 +443,18 @@ const RAI_OFFHAT = Dict{Int,Int}()
 const RAI_WALLT = Dict{Int,Float64}()
 const RAI_NOSNAP_UPSET = get(ENV, "JM_RAI_NOSNAP_UPSET", "1") != "0"
 const RAI_OFFROAD_V = parse(Float64, get(ENV, "JM_RAI_OFFROAD_V", "15.0"))
+const RAI_SPIN_AT = (_v = split(get(ENV, "JM_RAI_SPIN_AT", "0:0"), ':'); (parse(Float64, _v[1]), parse(Int, _v[2])))
+const RAI_SPIN_DONE = Ref(false)
 const RAI_RETIRE_S = parse(Float64, get(ENV, "JM_RAI_RETIRE_S", "15.0")); const RAI_REMOVE_S = parse(Float64, get(ENV, "JM_RAI_REMOVE_S", "6.0"))
 const RAI_REC = Dict{Int,Float64}()
 const RAI_PROGT = Dict{Int,Tuple{Float64,Float64}}()
 const RAI_OUT = Dict{Int,Float64}()
 const RAI_GONE = Set{Int}()
-rai_nosnap_reset!() = (empty!(RAI_OFFHAT); empty!(RAI_CLASSICW); empty!(RAI_WALLT); empty!(RAI_REC); empty!(RAI_PROGT); empty!(RAI_OUT); empty!(RAI_GONE); nothing)
+
+const RAI_SPINREC = Dict{Int,Tuple{Symbol,Float64,Float64}}()
+const RAI_SPINREC_ON = get(ENV, "JM_RAI_SPINREC", "1") != "0"
+const RAI_SPINREC_IN = deg2rad(parse(Float64, get(ENV, "JM_RAI_SPINREC_DEG", "100"))); const RAI_SPINREC_OUT = deg2rad(35.0)
+rai_nosnap_reset!() = (empty!(RAI_OFFHAT); empty!(RAI_ABS); empty!(RAI_SPINREC); RAI_SPIN_DONE[] = false; empty!(RAI_CLASSICW); empty!(RAI_WALLT); empty!(RAI_REC); empty!(RAI_PROGT); empty!(RAI_OUT); empty!(RAI_GONE); nothing)
 const AI_GRID_LEVEL = get(ENV, "JM_AI_GRID_LEVEL", "0") != "0"
 const RAI_HDIAG = get(ENV, "JM_RAI_HDIAG", "0") != "0"; const RAI_HLAST = Dict{Int,Float64}()
 const RAI_RESEAT = get(ENV, "JM_RAI_RESEAT", "1") != "0"
@@ -447,7 +484,7 @@ to get back on the road at one point". R (respawn) and SHIFT+R (recover) TELEPOR
 along the centreline. The unwrap here assumes every step is a small FORWARD one, so a backward jump
 of more than half a lap has `+= total` applied and comes out as a large FORWARD step -- crediting
 up to 40% of a lap in one frame, which banks an instant lap and corrupts the lap COUNT (and with it
-`cs.laps >= RACE_LAPS`, the race-over announcement, and the replay written at exit).
+`cs.laps >= RACE_LAPS_R[]`, the race-over announcement, and the replay written at exit).
 
 A teleport is not motion, so it contributes NOTHING. Extracted as a function so a gate can exercise
 the real rule instead of a copy of it.
@@ -565,6 +602,7 @@ const DRAFT_LEN = 26.0; const DRAFT_LAT = 2.8; const TOW_MAX = 4.0
 const DRAFT_DRAG_CUT = clamp(parse(Float64, get(ENV, "JM_DRAFT_CUT", "0.45")), 0.0, 0.8)
 
 const RAI_DRAFT_LEN = parse(Float64, get(ENV, "JM_RAI_DRAFT_LEN", "40.0"))
+const _AI_LEADS = NTuple{4,Float64}[]
 function draft_tow(fx, fz, fθ, fv, leads; len = DRAFT_LEN)
     fv < 26.0 && return 0.0
     hx = cos(fθ); hz = sin(fθ); best = 0.0
@@ -719,7 +757,7 @@ const REF_LAP = Dict("zandvoort"=>86.848, "nurburgring"=>501.931, "watglen"=>66.
 const AI_REFLAP = (v = tryparse(Float64, get(ENV, "JM_AI_REFLAP", ""));
                    v === nothing ? get(REF_LAP, TRACKSEL, 90.0) : v)
 println("  → mode: ", uppercasefirst(MODE),
-        IS_RACE ? "  ($RACE_LAPS laps" * (N_AI>0 ? ", $N_AI AI cars)" : ")") : "")
+        IS_RACE ? "  ($(RACE_LAPS_R[]) laps" * (N_AI>0 ? ", $N_AI AI cars)" : ")") : "")
 
 const FUEL_LPK    = clamp(tryparse(Float64, get(ENV,"JM_FUEL_LPK","0.55")) |> x-> x===nothing ? 0.55 : x, 0.05, 5.0)
 const FUEL_MARGIN = max(0, tryparse(Int, get(ENV,"JM_FUEL_MARGIN","10")) |> x-> x===nothing ? 10 : x)
@@ -731,7 +769,7 @@ const FUEL_START_L = Ref(NaN)
 function fuel_start_litres(laplen_m)
     FUEL_MODE == "full" && return DriveRT3D.FUEL_MAX_L
     x = tryparse(Float64, FUEL_MODE); x !== nothing && return clamp(x, 1.0, DriveRT3D.FUEL_MAX_L)
-    laps = (IS_RACE ? RACE_LAPS : 10) + 2
+    laps = (IS_RACE ? RACE_LAPS_R[] : 10) + 2
     clamp(laps*FUEL_PLAN_LPK*laplen_m/1000, 1.0, DriveRT3D.FUEL_MAX_L)
 end
 
@@ -1108,7 +1146,7 @@ function warm_lines()
 end
 
 const WARM_RACE_ON = get(ENV, "JM_WARM_RACE", "1") != "0"
-const WARM_RACE_FREE = ("JM_GARAGE", "JM_AI_SEED")
+const WARM_RACE_FREE = ("JM_GARAGE", "JM_AI_SEED", "JM_LAPS")
 warm_key(k) = startswith(k, "JM_") || k == "TRACK" || k == "ZAND_SHIFT"
 function warm_race_env(p)
     WARM_RACE_ON || return "warm races are off (JM_WARM_RACE=0)"
@@ -1215,6 +1253,9 @@ const AD_SLOW_T = Ref(0.0)
 
 const AUTODRIVE_TRAFFIC = get(ENV, "JM_AUTODRIVE_TRAFFIC", "0") != "0"
 const AD_TRAFFIC = Ref(NTuple{3,Float64}[])
+
+const ADRIVE_ON = Ref(false); const ADRIVE_AT = Ref(-1.0); const ADRIVE_PK = Ref(false); const ADRIVE_BTN_HIT = Ref(false)
+const ADRIVE_PACE = parse(Float64, get(ENV, "JM_AIDRIVE_PACE", "0.85"))
 const AUTODRIVE_PROF_PACE = parse(Float64, get(ENV, "JM_AUTODRIVE_PROFILE", "0"))
 const AUTODRIVE_PROF = Ref{Any}(nothing)
 const GROUND_LAT_SMOOTH = get(ENV, "JM_GROUND_LAT_SMOOTH", "0") != "0"
@@ -5212,6 +5253,7 @@ const SHOTS_DIR   = get(ENV, "JM_SHOTS_DIR", "/tmp")
 
 const CRASH_SPEC   = get(ENV, "JM_CRASH", "")
 const CRASH_FRAMES = parse(Int, get(ENV, "JM_CRASH_FRAMES", "150"))
+const CRASH_KEEPDMG = get(ENV, "JM_CRASH_KEEPDMG", "0") != "0"
 const CRASH_ON     = haskey(ENV, "JM_SMOKE") && !isempty(CRASH_SPEC)
 const CRASHES      = NTuple{4,Float64}[]
 
@@ -5236,7 +5278,7 @@ const PACE_ON  = get(ENV, "JM_PACE", "1") != "0"
 const DSTAT = get(ENV, "JM_DRAWSTATS", "0") != "0"; const GPUSYNC = get(ENV, "JM_GPUSYNC", "0") != "0"
 const AISTEP_DIAG = get(ENV, "JM_AISTEP_DIAG", "0") != "0"; const AISTEP_ACC = zeros(3)
 const DS_LOOP = Ref(0.0); const DS_PREV = Ref(0.0); const DS_SIM = zeros(2); const DS_T0 = Ref(0.0); const DS_SIMACC = zeros(3); const DS_T = zeros(6); const DS_ACC = zeros(5); const DS_N = zeros(Int, 6); const DS_NA = zeros(Int, 6); const DS_CNT = Ref(0)
-const ALLOCSITES = get(ENV, "JM_ALLOCSITES", "0") != "0"
+const ALLOCSITES = get(ENV, "JM_ALLOCSITES", "0") != "0"; const ALLOCSITES_AT = parse(Int, get(ENV, "JM_ALLOCSITES_AT", "300")); const ALLOCPROBE = get(ENV, "JM_ALLOCPROBE", "0") != "0"
 const ALLOCPROF = parse(Int, get(ENV, "JM_ALLOCPROF", "0"))
 const ALLOC_MARK = zeros(Int, 5); const ALLOC_ACC = zeros(Int, 4); const ALLOC_N = Ref(0)
 const PACE_HI  = parse(Float64, get(ENV, "JM_PACE_HI", "19.0")) / 1000
@@ -6267,7 +6309,9 @@ const TRACKGAIN = let
     g
 end
 
-monza_obj_grade(nm) =
+const _MZGRADE = Dict{String,Symbol}()
+monza_obj_grade(nm) = get!(() -> _monza_obj_grade(nm), _MZGRADE, String(nm))
+_monza_obj_grade(nm) =
     (nm in ("paddock","cgroad","chicane","ascari","bnk_trcr") || occursin(r"^sec\d", nm)) ? :road :
     ((startswith(nm,"nbank")||startswith(nm,"sbank")||startswith(nm,"sbnk")||startswith(nm,"nbnk")||startswith(nm,"bnk")) &&
         !occursin("ads",nm) && !occursin("shel",nm) && !occursin("pep",nm)) ? :bank :
@@ -9714,6 +9758,7 @@ const PROJ_COCKPIT_F = proj_full(parse(Float64, get(ENV,"JM_FOV","50")), 0.20)
 
 const FS_BTN = something(tryparse(Int, get(ENV, "JM_FULLSCREEN_BTN", "")),
                          isfile(_JOYCONF) ? something((m = match(r"(?m)^fullscreen_btn\s+(\d+)", read(_JOYCONF, String)); m === nothing ? nothing : parse(Int, m[1])), 0) : 0)
+const MAPZ_PK = Ref(false)
 const FS_ON = Ref(FULLSCREEN); const FS_PREV = Ref(false)
 const FS_BTN_WINDOW = get(ENV, "JM_FS_BTN_WINDOW", "0") != "0"
 function toggle_fullscreen!()
@@ -9786,6 +9831,8 @@ function read_input()
                                    toggle_fullscreen!())
             FS_PREV[] = fp
         end
+        xbtn_pressed!(:map, bs) && map_zoom_cycle!()
+        xbtn_pressed!(:aidrive, bs) && (ADRIVE_BTN_HIT[] = true)
         STEER_GAIN[] > 0 && (str = JoyCfg.steer_physical(JOYMAP_R[], js, STEER_GAIN[]; lim = STEER_LIM[]))
     end
 
@@ -10428,6 +10475,73 @@ const _DX_SHOTS       = !isempty(SHOTS_AT)
 
 include(joinpath(@__DIR__, "main_diag.jl"))
 include(joinpath(@__DIR__, "main_loop.jl"))
+
+const GROUND_SMOOTH = parse(Float64, get(ENV, "JM_GROUND_SMOOTH", "1.0"))
+const STEP_GUARD_ON = get(ENV, "JM_STEP_GUARD", "1") != "0"
+const WALL_CLIMB = parse(Float64, get(ENV, "JM_WALL_CLIMB", "3.0"))
+const LASTZ = Ref(0.0); const ONTRACK = Ref(true)
+function groundz(x, z; acquire = false, hold = true)
+    SKIDPAD && return 0.0
+    h = JRTrack.hat3d(TERRAIN, x, z; ref=Inf)
+    hold || return h[3] ? Float64(h[1]) : LASTZ[]
+
+    if h[3] && (acquire || !MONZA || Float64(h[1]) <= LASTZ[] + WALL_CLIMB)
+        LASTZ[] = Float64(h[1]); ONTRACK[] = true
+    else
+        ONTRACK[] = false
+    end
+    LASTZ[]
+end
+
+const PLAYER_G = Ref(NaN); const PLAYER_HDG = Ref(NaN); const STEP_GUARD_HITS = Ref(0)
+function ground_smoothed(x, z, g0)
+    (GROUND_SMOOTH <= 0.0 || !isfinite(PLAYER_HDG[]) || !(g0 > -900f0) || SKIDPAD) && return g0
+    hx = cos(PLAYER_HDG[]); hz = sin(PLAYER_HDG[])
+    acc = Float64(g0); nacc = 1
+    for d in (-2.0, -1.0, 1.0, 2.0)
+        h = JRTrack.hat3d(TERRAIN, x + hx*d*GROUND_SMOOTH, z + hz*d*GROUND_SMOOTH; ref=Inf)
+        h[3] || return g0
+        acc += Float64(h[1]); nacc += 1
+    end
+    Float32(acc / nacc)
+end
+function groundz_phys(x, y)
+    g = groundz(x, y)
+    g > -900f0 || return NaN32
+    g = ground_smoothed(x, y, g)
+
+    if TRK_CAL.on && !SKIDPAD
+        hr = JRTrack.hat(TRKSURF_G, x, y)
+
+        hl = GROUND_LAT_SMOOTH ? hr : JRTrack.hat(TRKSURF, x, y)
+        if hr.found && hl.found
+            al = abs(hl.lateral); _ld = ground_ribbon_ld(hr.lapdist)
+            if al < TRK_ROAD_LAT + TRK_BLEND
+                ht = trk_road(_ld, hl.lateral)
+                w = smoothblend((TRK_ROAD_LAT + TRK_BLEND - al) / TRK_BLEND) * trk_conf(_ld, hl.lateral)
+
+                gm = Float64(g)
+                if w < 0.999
+                    hd = JRTrack.hat3d(TERRAIN, x, y; ref = ht + 3.0)
+                    hd[3] && (gm = ground_smoothed(x, y, Float32(hd[1])))
+                end
+                g = Float32(w*ht + (1-w)*gm)
+            end
+        end
+    end
+    gf = Float64(g) + kerb_bump(x, y) + road_rough(x, y)
+    ok, held = STEP_GUARD_ON ? StepGuard.step_guard(gf, PLAYER_G[], WALL_CLIMB) : (true, gf)
+    if !ok
+        STEP_GUARD_HITS[] += 1
+        STEP_GUARD_HITS[] <= 5 && println("  ⚠ step guard: ground jumped ", round(gf - PLAYER_G[], digits=2),
+                                          " m at (", round(x, digits=1), ", ", round(y, digits=1),
+                                          ") -- holding ", round(PLAYER_G[], digits=2), " m (JM_STEP_GUARD=0 disables)")
+        return Float32(held)
+    end
+    PLAYER_G[] = gf
+    Float32(gf)
+end
+
 const _MAIN_Q = quote
 function main()
     tstamp("  [E80] .. main() entered (its compile is the gap above)")
@@ -10491,59 +10605,10 @@ function main()
         println("  textures clamped to edge on untiled axes: S ", c[1], ", T ", c[2], " of ", length(Render.UVRANGE))
     end
 
-    PLAYER_G = Ref(NaN)
+    PLAYER_G[] = NaN
 
-    GROUND_SMOOTH = parse(Float64, get(ENV, "JM_GROUND_SMOOTH", "1.0"))
-    PLAYER_HDG = Ref(NaN)
-    function ground_smoothed(x, z, g0)
-        (GROUND_SMOOTH <= 0.0 || !isfinite(PLAYER_HDG[]) || !(g0 > -900f0) || SKIDPAD) && return g0
-        hx = cos(PLAYER_HDG[]); hz = sin(PLAYER_HDG[])
-        acc = Float64(g0); nacc = 1
-        for d in (-2.0, -1.0, 1.0, 2.0)
-            h = JRTrack.hat3d(TERRAIN, x + hx*d*GROUND_SMOOTH, z + hz*d*GROUND_SMOOTH; ref=Inf)
-            h[3] || return g0
-            acc += Float64(h[1]); nacc += 1
-        end
-        Float32(acc / nacc)
-    end
-    STEP_GUARD_ON = get(ENV, "JM_STEP_GUARD", "1") != "0"
-    STEP_GUARD_HITS = Ref(0)
-    function groundz_phys(x, y)
-        g = groundz(x, y)
-        g > -900f0 || return NaN32
-        g = ground_smoothed(x, y, g)
-
-        if TRK_CAL.on && !SKIDPAD
-            hr = JRTrack.hat(TRKSURF_G, x, y)
-
-            hl = GROUND_LAT_SMOOTH ? hr : JRTrack.hat(TRKSURF, x, y)
-            if hr.found && hl.found
-                al = abs(hl.lateral); _ld = ground_ribbon_ld(hr.lapdist)
-                if al < TRK_ROAD_LAT + TRK_BLEND
-                    ht = trk_road(_ld, hl.lateral)
-                    w = smoothblend((TRK_ROAD_LAT + TRK_BLEND - al) / TRK_BLEND) * trk_conf(_ld, hl.lateral)
-
-                    gm = Float64(g)
-                    if w < 0.999
-                        hd = JRTrack.hat3d(TERRAIN, x, y; ref = ht + 3.0)
-                        hd[3] && (gm = ground_smoothed(x, y, Float32(hd[1])))
-                    end
-                    g = Float32(w*ht + (1-w)*gm)
-                end
-            end
-        end
-        gf = Float64(g) + kerb_bump(x, y) + road_rough(x, y)
-        ok, held = STEP_GUARD_ON ? StepGuard.step_guard(gf, PLAYER_G[], WALL_CLIMB) : (true, gf)
-        if !ok
-            STEP_GUARD_HITS[] += 1
-            STEP_GUARD_HITS[] <= 5 && println("  ⚠ step guard: ground jumped ", round(gf - PLAYER_G[], digits=2),
-                                              " m at (", round(x, digits=1), ", ", round(y, digits=1),
-                                              ") -- holding ", round(PLAYER_G[], digits=2), " m (JM_STEP_GUARD=0 disables)")
-            return Float32(held)
-        end
-        PLAYER_G[] = gf
-        Float32(gf)
-    end
+    PLAYER_HDG[] = NaN
+    STEP_GUARD_HITS[] = 0
 
     groundz_ai(x, y) = (r = ground_road(x, y); r[2] ? Float32(r[1] + kerb_bump(x, y) + road_rough(x, y)) : Float32(objground_at(x, y)))
 
@@ -10587,26 +10652,11 @@ function main()
         end
     end
     cs0 = SKIDPAD ? (x=0.0, z=0.0, θ=0.0) : spawn(CAR; v0=0.0)
-    LASTZ = Ref(0.0); ONTRACK = Ref(true)
+    LASTZ[] = 0.0; ONTRACK[] = true
     LASTGX = Ref(cs0.x); LASTGZ = Ref(cs0.z)
     OFFDIST = Ref(0.0)
     PLAYER_CDA = Ref(1.0)
     BND_FX = Ref(0.0); BND_FY = Ref(0.0); BND_MZ = Ref(0.0)
-
-    WALL_CLIMB = parse(Float64, get(ENV, "JM_WALL_CLIMB", "3.0"))
-
-    function groundz(x, z; acquire = false, hold = true)
-        SKIDPAD && return 0.0
-        h = JRTrack.hat3d(TERRAIN, x, z; ref=Inf)
-        hold || return h[3] ? Float64(h[1]) : LASTZ[]
-
-        if h[3] && (acquire || !MONZA || Float64(h[1]) <= LASTZ[] + WALL_CLIMB)
-            LASTZ[] = Float64(h[1]); ONTRACK[] = true
-        else
-            ONTRACK[] = false
-        end
-        LASTZ[]
-    end
 
     if get(ENV, "JM_LASTZ_TEST", "") != "" && !SKIDPAD
         let (qx, qz) = parse.(Float64, split(ENV["JM_LASTZ_TEST"], ":"))
@@ -11970,7 +12020,7 @@ function main()
 
     FUEL_ON   = !SKIDPAD
     burn_lap  = FUEL_ON ? FUEL_LPK * LAPLEN/1000 : 0.0
-    fuel_laps = IS_RACE ? (RACE_LAPS + FUEL_MARGIN) : 40
+    fuel_laps = IS_RACE ? (RACE_LAPS_R[] + FUEL_MARGIN) : 40
     fuel      = Ref(FUEL_ON ? burn_lap * fuel_laps : 0.0)
     FUEL1     = FUEL_ON && isfinite(FUEL_START_L[])
     if FUEL1
@@ -11980,7 +12030,7 @@ function main()
     fuel_mass_t = Ref(-1e9)
     if FUEL_ON
         println("  → fuel: ", round(fuel[],digits=1), " L = ", fuel_laps, " laps",
-                IS_RACE ? " ($RACE_LAPS race + $FUEL_MARGIN margin)" : "",
+                IS_RACE ? " ($(RACE_LAPS_R[]) race + $FUEL_MARGIN margin)" : "",
                 "  (", round(burn_lap,digits=2), " L/lap)")
     end
 
@@ -12654,7 +12704,7 @@ function main()
          tt = REP_TT ? ntuple(j -> ch(REPLAY_TT_CH[j]), 24) : nothing)
     end
     REPLAY && println("  ▶ REPLAY: $(basename(REPLAY_FILE)) — $(repd.nframes) frames, $(round(rep_dur,digits=1))s, $(repd.ncar) cars\n" *
-        "  SPACE play/pause · ←/→ seek · PgUp/PgDn ±10 s · Home/End start/end · ↑/↓ speed · V switch ANGLE (cockpit/chase/TV/F10/nose/RR-susp) · C switch CAR · W tyres panel · F band on/off · Esc quit")
+        "  SPACE play/pause · ←/→ seek · ⇧←/⇧→ previous/next contact with your car · PgUp/PgDn ±10 s · Home/End start/end · ↑/↓ speed · V switch ANGLE (cockpit/chase/TV/F10/nose/RR-susp) · C switch CAR · W tyres panel · F band on/off · Esc quit")
 
     telem = SMOKE ? nothing : open("$(TRACKSEL)_racer_$(round(Int,time())).txt", "w")
 
@@ -12724,6 +12774,7 @@ function main()
         GLFW.PollEvents()
         (key(GLFW.KEY_ESCAPE) || took_key!(GLFW.KEY_ESCAPE)) && (println("  [exit] ESC at t=", round(cs.t, digits = 2)); flush(stdout); break)
         kf = key(GLFW.KEY_F); (HUDBAND_ON && kf && !BAND_PF[]) && (BAND_HIDDEN[] = !BAND_HIDDEN[]); BAND_PF[] = kf
+        kz = key(GLFW.KEY_Z); (kz && !MAPZ_PK[]) && map_zoom_cycle!(); MAPZ_PK[] = kz
 
         (KEY_AT !== nothing && KEY_AT_T[] == 0 && cs.t >= KEY_AT[1]) && (KEY_AT_T[] = time(); println("  [test] key ", KEY_AT[2], " pressed at t=", round(cs.t, digits = 2)); flush(stdout))
 
@@ -12762,7 +12813,29 @@ function main()
             race_done = _rs.race_done; player_prog = _rs.player_prog; player_s_prev = _rs.player_s_prev
         end
 
-        if AUTODRIVE && CLINE !== nothing
+        kp_ = key(GLFW.KEY_P); _adt = (kp_ && !ADRIVE_PK[]) || ADRIVE_BTN_HIT[]; ADRIVE_PK[] = kp_; ADRIVE_BTN_HIT[] = false
+        if _adt && !AUTODRIVE && !REPLAY && CLINE !== nothing
+            if ADRIVE_ON[] || ADRIVE_AT[] >= 0
+                ADRIVE_ON[] = false; ADRIVE_AT[] = -1.0; gearbox_notice!("YOU HAVE CONTROL", 2.0)
+                println("  [aidrive] you have control (t ", round(cs.t, digits = 1), ")"); flush(stdout)
+            else
+                ADRIVE_AT[] = cs.t + 3.0
+                println("  [aidrive] the AI takes your car in 3 s (t ", round(cs.t, digits = 1), ")"); flush(stdout)
+                if ADLINE[] === nothing && AUTODRIVE_ROAD && CLASSICW_ON
+                    AD_OFF[] = autodrive_offsets(CLINE)
+                    ADLINE[] = autodrive_line(CLINE, AD_OFF[], (x, z) -> (r = ground_road(x, z); r[2] ? r[1] : NaN))
+                end
+            end
+        end
+        if ADRIVE_AT[] >= 0
+            if cs.t >= ADRIVE_AT[]
+                ADRIVE_ON[] = true; ADRIVE_AT[] = -1.0; gearbox_notice!("AI DRIVING -- P or the AI button to take over", 4.0)
+                println("  [aidrive] the AI is driving your car (t ", round(cs.t, digits = 1), ")"); flush(stdout)
+            else
+                gearbox_notice!(string("AI TAKES YOUR CAR IN ", ceil(Int, ADRIVE_AT[] - cs.t)), 0.3)
+            end
+        end
+        if (AUTODRIVE || ADRIVE_ON[]) && CLINE !== nothing
             inp = autodrive_step!(cs, CLINE, frames, dt, groundz, inp, ONTRACK)
 
             (START_ARM && HOLD_START && phase[] == :race && !race_go[]) &&
@@ -13033,6 +13106,16 @@ function main()
         end
 
         allocsites_report!(cs, frames)
+        if ALLOCPROBE && frames == ALLOCSITES_AT
+            let x = Float64(cs.x), z = Float64(cs.z)
+                for _ in 1:3; groundz_phys(x, z); groundz(x, z); ground_smoothed(x, z, 0f0); JRTrack.hat3d(TERRAIN, x, z; ref = Inf); JRTrack.hat(TRKSURF, x, z); end
+                a1 = @allocated groundz_phys(x, z); a2 = @allocated groundz(x, z); a3 = @allocated ground_smoothed(x, z, 0f0)
+                a4 = @allocated JRTrack.hat3d(TERRAIN, x, z; ref = Inf); a5 = @allocated JRTrack.hat(TRKSURF, x, z)
+                a6 = @allocated kerb_bump(x, z); a7 = @allocated road_rough(x, z)
+                println("  [allocprobe] B per call: groundz_phys ", a1, ", groundz ", a2, ", ground_smoothed ", a3, ", hat3d ", a4,
+                        ", hat ", a5, ", kerb_bump ", a6, ", road_rough ", a7); flush(stdout)
+            end
+        end
 
         mirror_ema_step!(frames)
         titleT = title_step!(cs, win, now, titleT, REPLAY, FUEL_ON, repd, rep_focus, rep_cam, rep_rt, rep_dur, rep_play, rep_speed, AICARS, standings, race_go, phase, cd_armed, cd_left, race_done, player_finpos, best_lap, fmt_lap, player_grid, fuel, burn_lap)
@@ -13063,7 +13146,9 @@ function main()
         if wp === :race
             instant_replay_reset!(); gearbox_restore!()
             REPLAY_FILE_R[] = ""; INSTANT_AT_END[] = false
-            println("  [warm] race: the next session on ", TRACKSEL, " in this process -- the setup installed again"); flush(stdout)
+            RACE_LAPS_R[] = race_laps_env()
+            println("  [warm] race: the next session on ", TRACKSEL, " in this process -- the setup installed again, ",
+                    RACE_LAPS_R[], " laps"); flush(stdout)
             reload_controller!()
             apply_session_setup!()
             GLFW.ShowWindow(win); go_fullscreen!()

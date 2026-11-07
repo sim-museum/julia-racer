@@ -661,7 +661,7 @@ const VFRAME_INERTIAL = lowercase(get(ENV, "JM_VFRAME", "inertial")) != "legacy"
 const SLOPE_G = Ref(true)
 const SLOPE_TAU = 0.05
 const _GSET = IdDict{Any,Any}()
-function _slope_gravity!(c, terr, grounded, subdt)
+function _slope_gravity!(c, terr, grounded, subdt, st = _gset(c), integ = c.integ)
     sx, sy = 0.0, 0.0
     if SLOPE_G[] && grounded && all(isfinite, terr)
         gx = ((terr[1] + terr[2]) - (terr[3] + terr[4])) / (2*(WHEELS[1][1] - WHEELS[3][1]))
@@ -671,8 +671,8 @@ function _slope_gravity!(c, terr, grounded, subdt)
     end
     p = c.gsl_set ? c.gsl : (sx, sy); α = min(1.0, subdt/SLOPE_TAU)
     q = (p[1] + α*(sx - p[1]), p[2] + α*(sy - p[2])); c.gsl = q; c.gsl_set = true
-    st = get!(() -> (ModelingToolkit.setp(c.sys, c.sys.sgx), ModelingToolkit.setp(c.sys, c.sys.sgy)), _GSET, c.sys)
-    st[1](c.integ, q[1]); st[2](c.integ, q[2])
+
+    st[1](integ, q[1]); st[2](integ, q[2])
     if SLOPE_DIAG[] > 0 && c.t >= c.gslt + SLOPE_DIAG[]
         c.gslt = c.t
         println("  [slope] t ", round(c.t; digits = 2), " s ", round(c.lapdist; digits = 1), " v ", round(c.v; digits = 1),
@@ -681,17 +681,19 @@ function _slope_gravity!(c, terr, grounded, subdt)
     q
 end
 const SLOPE_DIAG = Ref(0.0)
+
+_gset(c) = get!(() -> (ModelingToolkit.setp(c.sys, c.sys.sgx), ModelingToolkit.setp(c.sys, c.sys.sgy)), _GSET, c.sys)
 const _VSTATE = IdDict{Any,Any}()
 _vstate(c) = get!(_VSTATE, c.sys) do
-    vs = [c.sys.w, c.sys.wFL.vu, c.sys.wFR.vu, c.sys.wRL.vu, c.sys.wRR.vu]
+    vs = (c.sys.w, c.sys.wFL.vu, c.sys.wFR.vu, c.sys.wRL.vu, c.sys.wRR.vu)
     (ModelingToolkit.getsym(c.sys, vs), ModelingToolkit.setu(c.sys, vs))
 end
 
 const _GET9 = IdDict{Any,Any}()
 _get9(c) = get!(_GET9, c.sys) do
-    ModelingToolkit.getsym(c.sys, [c.sys.X, c.sys.Y, c.sys.ψ, c.sys.u, c.sys.v, c.sys.FzFL, c.sys.FzFR, c.sys.FzRL, c.sys.FzRR])
+    ModelingToolkit.getsym(c.sys, (c.sys.X, c.sys.Y, c.sys.ψ, c.sys.u, c.sys.v, c.sys.FzFL, c.sys.FzFR, c.sys.FzRL, c.sys.FzRR))
 end
-function _substeps!(c, integ, getall, get9, szr, svr, groundz, nsub, subdt)
+function _substeps!(c, integ, getall, get9, szr, svr, groundz, nsub, subdt, gset = _gset(c), vst = _vstate(c))
     a = get9(integ)
     terr = ntuple(_->0.0, 4)
     grounded_last = false
@@ -717,7 +719,7 @@ function _substeps!(c, integ, getall, get9, szr, svr, groundz, nsub, subdt)
         ΣFz = a[6] + a[7] + a[8] + a[9]
         grounded = ΣFz > 0.15 * 617 * 9.80665
         grounded_last = grounded; c.grounded = grounded
-        _slope_gravity!(c, terr_s, grounded, subdt)
+        _slope_gravity!(c, terr_s, grounded, subdt, gset, integ)
         vr_cg = (vr[1]+vr[2]+vr[3]+vr[4])/4
 
         if VFRAME_INERTIAL
@@ -726,8 +728,7 @@ function _substeps!(c, integ, getall, get9, szr, svr, groundz, nsub, subdt)
 
             vref0 = c.vref_set ? c.vref : vref
             if vref != vref0
-                gs = _vstate(c)
-                gs[2](integ, gs[1](integ) .+ (vref0 - vref)); OrdinaryDiffEq.SciMLBase.u_modified!(integ, true)
+                vst[2](integ, vst[1](integ) .+ (vref0 - vref)); OrdinaryDiffEq.SciMLBase.u_modified!(integ, true)
             end
             c.vref = vref; c.vref_set = true; c.zref += vref*subdt
             zr = ntuple(i -> terr_s[i] - c.zref, 4)
@@ -788,7 +789,8 @@ function step_car3d!(c::Car3D, throttle, brake, steer, dt;
     c.s_st(c.integ, clamp(steer, -lock, lock) * MAXSTEER)
 
     Δ = max(dt, 1e-3); nsub = max(1, round(Int, Δ*300)); subdt = Δ/nsub
-    (a, terr, grounded_last) = _substeps!(c, c.integ, c.getall, _get9(c), c.s_zr, c.s_vr, groundz, nsub, subdt)
+
+    (a, terr, grounded_last) = _substeps!(c, c.integ, c.getall, _get9(c), c.s_zr, c.s_vr, groundz, nsub, subdt, _gset(c), _vstate(c))::Tuple{Vector{Float64},NTuple{4,Float64},Bool}
     c.x = a[1]; c.z = a[2]; c.θ = a[3]
     c.v = sqrt(a[4]^2 + a[5]^2); c.t = c.integ.t + c.toff
 

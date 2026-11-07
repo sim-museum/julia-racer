@@ -117,6 +117,12 @@ const VT_BRAKE = Ref(get(ENV, "JM_VT_BRAKE", "1") != "0")
 
 const BRAKE_A  = Ref(something(tryparse(Float64, get(ENV, "JM_BRAKE_A", "30.0")), 30.0))
 const SOFT_BAND = Ref(get(ENV, "JM_SOFT_BAND", "1") != "0")
+const TANGENT_SPAN = Ref(parse(Int, get(ENV, "JM_TANGENT_SPAN", "3")))
+const SEGMENT_TANGENT = Ref(get(ENV, "JM_SEGMENT_TANGENT", "0") != "0")
+const CATMULL_TANGENT = Ref(get(ENV, "JM_CATMULL_TANGENT", "0") != "0")
+"""Catmull-Rom position at parameter t on the segment p1 -> p2 (pose_at)."""
+@inline _crom(p0, p1, p2, p3, t) = (t2 = t*t; t3 = t2*t;
+    0.5*((2p1) + (-p0 + p2)*t + (2p0 - 5p1 + 4p2 - p3)*t2 + (-p0 + 3p1 - 3p2 + p3)*t3))
 const POSE_LERP = Ref(get(ENV, "JM_POSE_LERP", "0") != "0")
 
 const SOFT_KNEE = Ref(something(tryparse(Float64, get(ENV, "JM_SOFT_KNEE", "0.7")), 0.7))
@@ -510,19 +516,17 @@ function pose_at(line::AILine, s, lane)
         y = line.y[i]*(1-f) + line.y[j]*f
     else
         nn = length(line.x); h = mod(i-2, nn) + 1; k = j % nn + 1
-        t = f; t2 = t*t; t3 = t2*t
-        cr(p0, p1, p2, p3) = 0.5*((2p1) + (-p0 + p2)*t + (2p0 - 5p1 + 4p2 - p3)*t2 + (-p0 + 3p1 - 3p2 + p3)*t3)
-        x = cr(line.x[h], line.x[i], line.x[j], line.x[k])
-        z = cr(line.z[h], line.z[i], line.z[j], line.z[k])
-        y = cr(line.y[h], line.y[i], line.y[j], line.y[k])
+        x = _crom(line.x[h], line.x[i], line.x[j], line.x[k], f)
+        z = _crom(line.z[h], line.z[i], line.z[j], line.z[k], f)
+        y = _crom(line.y[h], line.y[i], line.y[j], line.y[k], f)
     end
 
     n = length(line.x)
 
-    tanspan = parse(Int, get(ENV, "JM_TANGENT_SPAN", "3"))
-    θ = if get(ENV, "JM_SEGMENT_TANGENT", "0") != "0" || tanspan <= 0
+    tanspan = TANGENT_SPAN[]
+    θ = if SEGMENT_TANGENT[] || tanspan <= 0
         line.θ[i] + f*wrapπ(line.θ[j]-line.θ[i])
-    elseif get(ENV, "JM_CATMULL_TANGENT", "0") != "0"
+    elseif CATMULL_TANGENT[]
         h = mod(i-2, n) + 1
         k = j % n + 1
 

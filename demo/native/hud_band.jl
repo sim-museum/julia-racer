@@ -4,6 +4,11 @@ const BANDMIR_ON = HUDBAND_ON && get(ENV, "JM_HUDBAND_MIRROR", "1") != "0"
 const MAP_SPAN = parse(Float64, get(ENV, "JM_MAP_SPAN", "2600"))
 const MAP_FOLLOW = Ref(false)
 
+const MAP_ZOOM = Ref(1)
+const MAP_SPANS = (MAP_SPAN, parse(Float64, get(ENV, "JM_MAP_SPAN_MED", "1000")), parse(Float64, get(ENV, "JM_MAP_SPAN_CLOSE", "350")))
+map_zoom_cycle!() = (MAP_ZOOM[] = MAP_ZOOM[] % 3 + 1; println("  [map] zoom ", ("whole track", "medium", "close up")[MAP_ZOOM[]], " (",
+                                                              round(Int, MAP_SPANS[MAP_ZOOM[]]), " m across)"); flush(stdout); nothing)
+
 const HUDBAND_DIAG = something(tryparse(Float64, get(ENV, "JM_HUDBAND_DIAG", "")), NaN)
 const HUDBAND_DIAG_DONE = Ref(false)
 
@@ -107,11 +112,12 @@ end
 
 """The map in its box at MAP_SPAN metres across: whole and centred if the track fits, else the window around the car at
 (cx, cz) (scissored to the box). Ribbon, start tick, a disc per car (cars = (id, x, z, pos); id 0 = you, ringed)."""
+const MAP_XS = Float64[]; const MAP_YS = Float64[]
 function trackmap_draw_fixed!(bv, tv, font, m::TrackMap, bx, by, bw, bh, cars, sfx, sfz, cx, cz)
     m.ok || return nothing
-    ppm = bw/MAP_SPAN
+    ppm = bw/MAP_SPANS[MAP_ZOOM[]]
     tw = m.sc*ppm; th = m.sc/m.aspect*ppm
-    fits = tw <= bw && th <= bh
+    fits = tw <= bw && th <= bh && MAP_ZOOM[] == 1
     MAP_FOLLOW[] = !fits
     if fits
         ox = bx + (bw - tw)/2; oy = by + (bh - th)/2
@@ -119,7 +125,9 @@ function trackmap_draw_fixed!(bv, tv, font, m::TrackMap, bx, by, bw, bh, cars, s
         q = map_pt(m, cx, cz); ox = bx + bw/2 - q[1]*m.sc*ppm; oy = by + bh/2 - q[2]*m.sc*ppm
     end
     k = m.sc*ppm
-    n = length(m.ux); xs = [ox + m.ux[i]*k for i in 1:n]; ys = [oy + m.uy[i]*k for i in 1:n]
+
+    n = length(m.ux); xs = resize!(MAP_XS, n); ys = resize!(MAP_YS, n)
+    @inbounds for i in 1:n; xs[i] = ox + m.ux[i]*k; ys[i] = oy + m.uy[i]*k; end
     rw = clamp(bh/16, 3.0, 12.0)
     hpolyline!(bv, xs, ys, rw + 3.0, (0.92, 0.92, 0.92))
     hpolyline!(bv, xs, ys, rw, (0.05, 0.04, 0.04))
@@ -263,7 +271,7 @@ function hudband_draw!(cs, W, H, AICARS, best_lap, last_lap, lap_t0, race_done, 
         pk = st0 === nothing ? 1 : something(findfirst(e -> e[1] == 0, st0), 1)
         nf = st0 === nothing ? 1 : length(st0)
         lapn = REPCLK_ON[] ? REPCLK_LAPS[] : cs.laps
-        band_rows!(bv, gtv, L.pos, (("POS:", "$pk/$nf"), ("LAPS:", "$lapn/" * (IS_RACE ? string(RACE_LAPS) : "--"))); scale = 1.0band_textscale(L.pos[4]))
+        band_rows!(bv, gtv, L.pos, (("POS:", "$pk/$nf"), ("LAPS:", "$lapn/" * (IS_RACE ? string(RACE_LAPS_R[]) : "--"))); scale = 1.0band_textscale(L.pos[4]))
         c = LAPCLOCK; k = c.sec_lastdone; ns = length(c.sec_best)
         cur = REPCLK_ON[] ? REPCLK_CUR[] : (race_go[] && !race_done ? cs.t - lap_t0 : NaN)
         sk = 1 <= k <= ns
@@ -349,13 +357,13 @@ function band_events_step!(cs, race_go, race_done)
         BAND_LAPS[] = cs.laps
         if IS_RACE
             nxt = cs.laps + 1
-            if cs.laps == RACE_LAPS
+            if cs.laps == RACE_LAPS_R[]
                 BAND_EVT[] = (:finish, cs.t)
             elseif !race_done
-                nxt == RACE_LAPS ? (BAND_EVT[] = (:flag, cs.t)) : nxt < RACE_LAPS && (BAND_EVT[] = (:board, cs.t))
+                nxt == RACE_LAPS_R[] ? (BAND_EVT[] = (:flag, cs.t)) : nxt < RACE_LAPS_R[] && (BAND_EVT[] = (:board, cs.t))
             end
             BAND_EVT[][1] === :none || BAND_EVT[][2] != cs.t ||
-                (println("  [hudband] ", BAND_EVT[][1], " at t=", round(cs.t, digits = 2), " (lap ", min(nxt, RACE_LAPS), " of ", RACE_LAPS, ")"); flush(stdout))
+                (println("  [hudband] ", BAND_EVT[][1], " at t=", round(cs.t, digits = 2), " (lap ", min(nxt, RACE_LAPS_R[]), " of ", RACE_LAPS_R[], ")"); flush(stdout))
         end
     end
     if BAND_EVT_TEST !== nothing && !BAND_EVT_TESTED[] && cs.t >= BAND_EVT_TEST[1]
@@ -366,7 +374,7 @@ function band_events_step!(cs, race_go, race_done)
 end
 
 const FLAG_V = Float32[]
-"Draw flag `kind` (:yellow, :white, :chequer or :meatball) middle left of the 3D view, its cloth waving at sim time `t`."
+"Draw flag `kind` (:yellow, :white, :chequer, :meatball or :blue) middle left of the 3D view, its cloth waving at sim time `t`."
 function flag_draw!(kind::Symbol, t::Float64, W, H)
     v = empty!(FLAG_V)
     fw = round(0.11W); fh = round(0.62fw); fx = round(0.05W); fy = band_px() + round(0.45view_h() - fh/2)
@@ -375,7 +383,7 @@ function flag_draw!(kind::Symbol, t::Float64, W, H)
     for i in 0:nx-1
         ph = 2π*(1.6t - i/nx); dy = 0.05fh*sin(ph)*(i/nx); sd = 0.96 + 0.04*cos(ph)
         for j in 0:ny-1
-            c = kind === :yellow ? (0.98sd, 0.84sd, 0.08) : kind === :meatball ? (0.05, 0.05, 0.05) :
+            c = kind === :yellow ? (0.98sd, 0.84sd, 0.08) : kind === :meatball ? (0.05, 0.05, 0.05) : kind === :blue ? (0.08, 0.30sd, 0.88sd) :
                 (kind === :white || iseven(i + j)) ? (sd, sd, sd) : (0.06, 0.06, 0.06)
             Render.hquad!(v, fx + i*sw, fy + j*sh + dy, sw + 1, sh, c)
         end
@@ -402,8 +410,8 @@ function band_overlay_draw!(cs, W, H, AICARS, standings, texthud_name)
     elseif what === :board && FONT !== nothing
         st = (IS_RACE && !isempty(AICARS)) ? standings() : Tuple{Int,Float64}[(0, 0.0)]
         me = something(findfirst(e -> e[1] == 0, st), 1)
-        togo = max(RACE_LAPS - cs.laps, 0); lh = FONT.lineh; sc = 1.3
-        rows = String["LAP $(min(cs.laps + 1, RACE_LAPS)) OF $(RACE_LAPS)   -   $(togo) TO GO", "POSITION $(me) OF $(length(st))"]
+        togo = max(RACE_LAPS_R[] - cs.laps, 0); lh = FONT.lineh; sc = 1.3
+        rows = String["LAP $(min(cs.laps + 1, RACE_LAPS_R[])) OF $(RACE_LAPS_R[])   -   $(togo) TO GO", "POSITION $(me) OF $(length(st))"]
         for (i, e) in enumerate(st)
             i > 8 && break
             push!(rows, string(i, "  ", texthud_name(e[1])))
