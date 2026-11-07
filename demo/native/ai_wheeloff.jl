@@ -383,6 +383,7 @@ end
 (they take the place while they show)."""
 function yellow_flag_draw!(t::Float64, W, H)
     band_flag_shown(t) && return nothing
+    (bf_pending(0) || haskey(DSQ, 0)) && return flag_draw!(:black, t, W, H)
     meatball_on(t) && return flag_draw!(:meatball, t, W, H)
     yellow_on(t) && return flag_draw!(:yellow, t, W, H)
     blue_on(t) && flag_draw!(:blue, t, W, H)

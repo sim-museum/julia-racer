@@ -1157,8 +1157,23 @@ class DriveTab(QWidget):
             self.aiaggr.setVisible(rc); self.aiaggr_l.setVisible(rc)
         self.aistyle.currentIndexChanged.connect(_aistyle_changed)
         _aistyle_changed(0)
+
+        form.addWidget(QLabel("Incidents: black flag at / DSQ at:"), 10, 0)
+        self.inclim = QSpinBox(); self.inclim.setRange(0, 99); self.inclim.setSuffix("x")
+        self.inclim.setValue(int(st.value("session/inc_limit", 15)))
+        self.inclim.setToolTip("reference's incident points, the same for every driver (you and the AI): 0x light contact, 1x off the\n"
+                               "track, 2x a wall or a spin, 4x car-to-car contact (both drivers). At this many the black flag:\n"
+                               "drive through the pit lane under 80 km/h within 3 laps (again every 7x more), or you are disqualified.\n"
+                               "A clear-cut dive into a corner another car owned is a black flag at once. 0 = no penalties.")
+        self.inclim.valueChanged.connect(lambda v: st.setValue("session/inc_limit", v))
+        form.addWidget(self.inclim, 10, 1)
+        self.incmax = QSpinBox(); self.incmax.setRange(0, 199); self.incmax.setSuffix("x")
+        self.incmax.setValue(int(st.value("session/inc_max", 35)))
+        self.incmax.setToolTip("At this many incident points a driver is disqualified at once (DSQ: no place in the results). 0 = never.")
+        self.incmax.valueChanged.connect(lambda v: st.setValue("session/inc_max", v))
+        form.addWidget(self.incmax, 10, 2)
         form.setColumnStretch(1, 1)
-        form.setRowStretch(10, 1)
+        form.setRowStretch(11, 1)
 
         car = QGroupBox("Car"); cform = QGridLayout(car); cols.addWidget(car, 2)
 
@@ -1695,6 +1710,7 @@ class DriveTab(QWidget):
         wet != "1" and qenv.insert("JM_WETNESS", wet)
         qenv.insert("JM_AI_STYLE", self.aistyle.currentData() or "line")
         self.aistyle.currentData() == "racecraft" and qenv.insert("JM_RAI_AGGRESSION", f"{self.aiaggr.value():.2f}")
+        qenv.insert("JM_INC_LIMIT", str(self.inclim.value())); qenv.insert("JM_INC_MAX", str(self.incmax.value()))
         qenv.insert("ZAND_SHIFT", "auto" if self.gearbox.currentIndex() == 0 else "manual")
         qenv.insert("JM_CARSETUP", self.setup_choice()[0])
         gf = self.garage_file() if getattr(self, "garage_file", None) else None
@@ -2004,22 +2020,26 @@ class ResultTab(QWidget):
         except OSError:
             return False
         d = {r[0]: r[1] for r in rows if len(r) >= 2 and not r[0].startswith("P")}
-        grid = [(r[1], r[2] if len(r) >= 3 else "") for r in rows if r[0].startswith("P") and len(r) >= 2]
+        grid = [(r[1], r[2] if len(r) >= 3 else "", r[3] if len(r) >= 4 else "", r[4] if len(r) >= 5 else "")
+                for r in rows if r[0].startswith("P") and len(r) >= 2]
         best_any = next((r[1:] for r in rows if r[0] == "best_any"), ["-", "-"])
         your_laps = d.get("you_laps", "").split(",") if d.get("you_laps") else []
-        self.head.setText(
-            f"<b>{d.get('track','?').title()} — {d.get('laps','?')} laps</b><br>"
-            f"You finished <b>P{d.get('you_pos','?')}</b> of {d.get('field','?')} "
-            f"(started P{d.get('you_start','?')})")
+        yp = d.get('you_pos', '?')
+        res = (f"You were <b>disqualified</b>: {d.get('you_dsq','')} " if yp == "DSQ" else
+               "You were <b>not classified</b> (under 90 % of the winner's distance) " if yp == "NC" else
+               f"You finished <b>P{yp}</b> of {d.get('field','?')} ")
+        self.head.setText(f"<b>{d.get('track','?').title()} — {d.get('laps','?')} laps</b><br>" + res
+                          + f"(started P{d.get('you_start','?')})")
 
         crows = ["<table cellspacing=0 cellpadding=4 width='100%'>",
                  "<tr style='color:#888'><th align=left>Pos</th><th align=left>Car</th>"
-                 "<th align=right>Total&nbsp;/&nbsp;gap</th></tr>"]
-        for i, (name, gap) in enumerate(grid, 1):
+                 "<th align=right>Total&nbsp;/&nbsp;gap</th>" + ("<th align=right>Inc</th>" if any(g[2] for g in grid) else "") + "</tr>"]
+        for i, (name, gap, inc, status) in enumerate(grid, 1):
             you = (name == "You")
             sty = " style='background:#ffe98a;color:#000'" if you else ""
             nm = f"<b>{name}</b>" if you else name
-            crows.append(f"<tr{sty}><td>P{i}</td><td>{nm}</td><td align=right>{gap}</td></tr>")
+            pos = status if status else f"P{i}"
+            crows.append(f"<tr{sty}><td>{pos}</td><td>{nm}</td><td align=right>{gap}</td>" + (f"<td align=right>{inc}</td>" if inc else "") + "</tr>")
         crows.append("</table>")
         fast = (f"<br><b>Fastest lap:</b> {best_any[0]}"
                 + (f" &nbsp;({best_any[1]})" if len(best_any) > 1 else ""))
