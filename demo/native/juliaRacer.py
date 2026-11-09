@@ -232,6 +232,18 @@ def spectators_env(qenv, on):
     if on:
         qenv.insert("JM_SAFE_SPECTATORS", "1")
 
+def _ibt_template_present():
+    """NOIBT-1: the sim records .ibt only from a session template (JM_IBTDIR, the gold store, or data/reference/)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    dirs = [os.environ.get("JM_IBTDIR", ""), os.path.join(os.path.expanduser("~"), "gold standard", "julia racer"),
+            "/home/admin/gold standard/julia racer", os.path.normpath(os.path.join(here, "..", "..", "data", "reference"))]
+    for d in dirs:
+        if d and os.path.isdir(d):
+            for _, _, fs in os.walk(d):
+                if any(f.lower().endswith(".ibt") for f in fs):
+                    return True
+    return False
+
 class Ctrl:
     def __init__(self, axis=0, a=0.0, b=1.0):
         self.axis, self.a, self.b = int(axis), float(a), float(b)
@@ -1316,6 +1328,7 @@ class DriveTab(QWidget):
         sv.addWidget(self.mute); sv.addWidget(self.noffb); v.addWidget(snd)
         rec = QGroupBox("Recording"); rv = QVBoxLayout(rec)
         rv.addWidget(self.replay); rv.addWidget(self.ibt); v.addWidget(rec)
+        self.ibt.setVisible(_ibt_template_present())
         adv = QGroupBox("Advanced"); av = QVBoxLayout(adv)
         av.addWidget(self.d2); v.addWidget(adv)
         v.addStretch(1)

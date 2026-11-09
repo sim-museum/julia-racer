@@ -1,0 +1,8 @@
+# The AI's pace anchors, measured from the reference Lotus 49 sessions (the numbers only):
+# lateral grip = p99 of |LatAccel| on the skidpad; top speed = the rev limit through the gearing at runtime.
+# Read when no session telemetry is present (NOIBT-1); with it, the sim measures the same two numbers itself.
+lat_accel_p99 = 13.042016983032227      # m/s²
+lat_accel_samples = 11776
+lat_accel_source = "the 2026-06-24 skidpad session"
+rpm_limit = 9565.7529296875             # the highest RPM recorded
+rpm_limit_source = "the 2026-06-24 Nordschleife session"

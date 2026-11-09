@@ -1020,6 +1020,10 @@ println("  reference reference (.ibt template, session gearbox/mass): ", IBTDIR)
 
 function ibt_anchors()
     f = joinpath(IBTDIR, "ai_anchors.toml"); d = Dict{String,String}()
+
+    if !isfile(f) && !(isdir(IBTDIR) && any(fn -> endswith(lowercase(fn), ".ibt"), readdir(IBTDIR)))
+        f = normpath(joinpath(@__DIR__, "..", "..", "JuliaMotorMTK", "src", "ai_anchors.toml"))
+    end
     isfile(f) || return d
     for l in eachline(f)
         m = match(r"^\s*(\w+)\s*=\s*\"?([^\"#]*?)\"?\s*(#.*)?$", l); m === nothing || (d[m[1]] = strip(m[2]))
@@ -1110,8 +1114,15 @@ include(normpath(joinpath(@__DIR__,"..","..","JuliaMotorMTK","src","garage.jl"))
 
 const GARAGE_NOTE = Ref("")
 const GARAGE_PP = Ref{Any}(nothing)
+
+const SETUP_SHEETS = get(ENV, "JM_SETUP_SHEETS", normpath(joinpath(@__DIR__,"..","..","JuliaMotorMTK","src","setup_sheets.toml")))
+sheet_tmpl(key) = SETUP_SHEETS * "#" * key
+sheet_key(t) = (i = findlast('#', t); i !== nothing && t[1:i-1] == SETUP_SHEETS ? t[i+1:end] : nothing)
+has_setup(t) = isfile(t) || (sheet_key(t) !== nothing && isfile(SETUP_SHEETS))
+read_setup(t) = (k = sheet_key(t); k === nothing ? Setup.setup_params(IBT.session_yaml(IBT.ibt_open(t))) :
+                                                    Setup.sheet_params(SETUP_SHEETS, k))
 function session_params(fn::AbstractString)
-    pp = Setup.setup_params(IBT.session_yaml(IBT.ibt_open(fn)))
+    pp = read_setup(fn)
     Ks = Garage.calibrate_session(pp)
 
     K0 = Garage.julia_setup(Ks, isww103(pp) ? "ww103" : "default")
@@ -1159,7 +1170,8 @@ const IBTTMPL_DEFAULT = let want = (SKIDPAD ? "lotus49_skidpad" : "lotus49_nurbu
                                                              endswith(lowercase(f), ".ibt"),
                                                         readdir(IBTDIR))) : String[]
     off = (SKIDPAD || lowercase(get(ENV, "JM_DEFAULT_TEMPLATE", "")) == "june") ? "" : _official_ring(IBTDIR)
-    !isempty(off) ? off : isempty(cands) ? joinpath(IBTDIR, want * " (none found).ibt") : joinpath(IBTDIR, cands[1])
+    !isempty(off) ? off : !isempty(cands) ? joinpath(IBTDIR, cands[1]) :
+        isfile(SETUP_SHEETS) ? sheet_tmpl(SKIDPAD ? "skidpad" : "default") : joinpath(IBTDIR, want * " (none found).ibt")
 end
 
 const CARSETUPS = (
@@ -1196,7 +1208,9 @@ const IBTTMPL = if CARSETUP == "ww103"
         ok = try isww103(Setup.setup_params(IBT.session_yaml(IBT.ibt_open(f)))) catch; false end
         ok && push!(cands, f)
     end
-    if isempty(cands)
+    if isempty(cands) && !SKIDPAD && isfile(SETUP_SHEETS)
+        sheet_tmpl("ww103")
+    elseif isempty(cands)
 
         println("!! WW103: no ", want, " session with the WW103 setup under ", IBTDIR,
                 " (expected its 261005 folder) -- driving the reference DEFAULT setup instead")
@@ -1212,7 +1226,7 @@ println("  car setup: ", CARSETUP == "ww103" && IBTTMPL != IBTTMPL_DEFAULT ? "WW
 
 function apply_session_setup!()
     GARAGE_NOTE[] = ""; GARAGE_PP[] = nothing
-    if isfile(IBTTMPL)
+    if has_setup(IBTTMPL)
         try
             pp = session_params(IBTTMPL)
             PPSRC = basename(IBTTMPL) * (startswith(GARAGE_NOTE[], "garage: unchanged") || isempty(GARAGE_NOTE[]) ? "" : " + garage")
@@ -1250,7 +1264,7 @@ function apply_session_setup!()
             "   <- ", DriveRT3D.transmission_source())
     println("  AUTO up-shift: ", round(Int, DriveRT3D.SHIFT_RPM[]), " rpm (shift light)   <- ", DriveRT3D.SHIFT_SRC[])
 
-    let ratio = (isfile(IBTTMPL) ? (try session_params(IBTTMPL).steering_ratio catch; NaN end) : NaN),
+    let ratio = (has_setup(IBTTMPL) ? (try session_params(IBTTMPL).steering_ratio catch; NaN end) : NaN),
         src = isfinite(ratio) ? basename(IBTTMPL) : "built-in 10:1 (Lotus 49 setup) -- NOT from an ibt"
         isfinite(ratio) && ratio > 1 || (ratio = 10.0)
         STEER_RATIO[] = ratio
@@ -1582,7 +1596,7 @@ let spec = get(ENV, "JM_SETUP", "")
 end
 
 const IBTREC = IBTREC0 && isfile(IBTTMPL)
-if IBTREC0 && !IBTREC
+if IBTREC0 && !IBTREC && sheet_key(IBTTMPL) === nothing
     println("  (.ibt telemetry off: the reference template is not in this checkout — ",
             basename(IBTTMPL), ". The plain-text telemetry below is unaffected.)")
 end

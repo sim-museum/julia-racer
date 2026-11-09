@@ -2,7 +2,8 @@
 
 module Setup
 
-export parse_yaml_block, setup_params, firstnum
+export parse_yaml_block, setup_params, firstnum, sheet_params, sheet_table
+using TOML
 
 """    firstnum(s) -> Float64
 
@@ -104,6 +105,60 @@ function setup_params(yaml::AbstractString)
        shift_rpm  = haskey(di, "DriverCarSLShiftRPM") ? firstnum(di["DriverCarSLShiftRPM"]) : NaN,
        n_gears    = firstnum(di["DriverCarGearNumForward"]),
        fuel_kg_per_L = firstnum(di["DriverCarFuelKgPerLtr"]))
+end
+
+const SHEET_CORNERS = (:LF, :RF, :LR, :RR)
+const SHEET_PERCORNER = (:corner_weight_N, :spring_rate_Npmm, :ride_height_mm, :camber_deg, :cold_pressure_kPa,
+                         :packer_mm, :perch_mm, :bump_clicks, :rebound_clicks)
+const SHEET_STRINGS = (:arb_front, :arb_rear)
+
+"The TOML table for one setup: per-corner values as [LF, RF, LR, RR], shock deflection as [[static, max] x 4]."
+function sheet_table(pp)
+    d = Dict{String,Any}()
+    for k in keys(pp)
+        v = pp[k]
+        d[string(k)] = k in SHEET_PERCORNER ? [Float64(v[c]) for c in SHEET_CORNERS] :
+                       k === :shock_defl_mm ? [Float64[v[c]...] for c in SHEET_CORNERS] :
+                       k === :gear_ratios ? Float64.(v) :
+                       k in SHEET_STRINGS ? String(v) : Float64(v)
+    end
+    d
+end
+
+"`setup_params` from table `key` of a setup-sheet TOML (see sheet_table) -- field order and types as setup_params."
+function sheet_params(path::AbstractString, key::AbstractString)
+    t = TOML.parsefile(path)[key]
+    corner(k) = Dict(c => Float64(t[k][i]) for (i, c) in enumerate(SHEET_CORNERS))
+    f(k) = Float64(t[k])
+    (; corner_weight_N = corner("corner_weight_N"),
+       spring_rate_Npmm = corner("spring_rate_Npmm"),
+       ride_height_mm = corner("ride_height_mm"),
+       camber_deg = corner("camber_deg"),
+       cold_pressure_kPa = corner("cold_pressure_kPa"),
+       shock_defl_mm = Dict(c => (Float64(t["shock_defl_mm"][i][1]), Float64(t["shock_defl_mm"][i][2])) for (i, c) in enumerate(SHEET_CORNERS)),
+       packer_mm = corner("packer_mm"),
+       perch_mm = corner("perch_mm"),
+       brake_bias_pct = f("brake_bias_pct"),
+       steering_ratio = f("steering_ratio"),
+       cross_weight_pct = f("cross_weight_pct"),
+       final_drive = f("final_drive"),
+       gear_ratios = Float64.(t["gear_ratios"]),
+       diff_preload_Nm = f("diff_preload_Nm"),
+       diff_drive_ramp = f("diff_drive_ramp"),
+       diff_coast_ramp = f("diff_coast_ramp"),
+       diff_plates = f("diff_plates"),
+       toe_front_mm = f("toe_front_mm"),
+       toe_rear_mm = f("toe_rear_mm"),
+       arb_front = String(t["arb_front"]),
+       arb_rear = String(t["arb_rear"]),
+       bump_clicks = corner("bump_clicks"),
+       rebound_clicks = corner("rebound_clicks"),
+       fuel_L = f("fuel_L"),
+       idle_rpm = f("idle_rpm"),
+       redline_rpm = f("redline_rpm"),
+       shift_rpm = f("shift_rpm"),
+       n_gears = f("n_gears"),
+       fuel_kg_per_L = f("fuel_kg_per_L"))
 end
 
 end
