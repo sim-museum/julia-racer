@@ -403,6 +403,50 @@ function defold(cl; label = "centreline")
     out
 end
 
+"""TD261107-1 S5: smooth the JOGS of the AI's centreline (the frame its lanes, the Classic lateral mapping and its speed profile are
+read in). The re-centring on the visible road leaves single-node kinks where the road widens -- Zandvoort s 3990 (the pit entry
+on the main straight): node curvature 0.25 /m on a straight, an 0.8 m S-step over ~10 m. The AI's de-kink works on lanes at Classic's
+~3 m records and could not cancel a kink that sharp: the path kept an 0.4 m step and the field lifted / swerved there every lap.
+A SPIKE = curvature over 4 m chords > 0.1 /m with < 10 deg of heading change over +-14 m (a real corner turns); the gentler jogs
+(0.03-0.1 /m) are the lane de-kink's (AI-NOSNAP-1 S4) -- smoothing them here too moved Spa's frame 3 m on 520 nodes and doubled it.
+Nodes within 6 m of a spike move to the +-6 m moving average of the path (blended out over 6 m more). Nodes elsewhere are kept as
+they are, and a centreline without jogs is returned unchanged. JM_RAIL_DEJOG=0 = before."""
+function dejog(cl; label = "centreline")
+    (get(ENV, "JM_RAIL_DEJOG", "1") == "0" || length(cl) <= 16) && return cl
+    pts = [(Float64(p[1]), Float64(p[2])) for p in cl]; m = length(pts)
+    cum = zeros(m + 1); for i in 1:m; cum[i+1] = cum[i] + hypot(pts[mod1(i+1, m)][1] - pts[i][1], pts[mod1(i+1, m)][2] - pts[i][2]); end
+    L = cum[end]; st = 2.0; ns = floor(Int, L/st); ns > 30 || return cl
+    function at(s)
+        s = mod(s, L); i = clamp(searchsortedlast(cum, s), 1, m); f = (s - cum[i])/max(cum[i+1] - cum[i], 1e-9)
+        a = pts[i]; b = pts[mod1(i + 1, m)]; (a[1] + f*(b[1] - a[1]), a[2] + f*(b[2] - a[2]))
+    end
+    P = [at((k - 1)*st) for k in 1:ns]; Pk(k) = P[mod1(k, ns)]
+    hd(k) = (u = Pk(k + 1); v = Pk(k - 1); atan(u[2] - v[2], u[1] - v[1]))
+    jog = falses(ns); kmax = 0.0; smax = 0.0
+    for k in 1:ns
+        a = Pk(k - 2); b = Pk(k); c = Pk(k + 2)
+        cr = (b[1] - a[1])*(c[2] - b[2]) - (b[2] - a[2])*(c[1] - b[1])
+        d = hypot(b[1] - a[1], b[2] - a[2])*hypot(c[1] - b[1], c[2] - b[2])*hypot(c[1] - a[1], c[2] - a[2])
+        κ = d > 1e-9 ? abs(2cr/d) : 0.0
+        dh = hd(k + 7) - hd(k - 7); dh = atan(sin(dh), cos(dh))
+        if κ > 0.1 && abs(dh) < deg2rad(10)
+            jog[k] = true; κ > kmax && (kmax = κ; smax = (k - 1)*st)
+        end
+    end
+    js = findall(jog); isempty(js) && return cl
+    w(s) = (dk = minimum(min(abs(s - (j - 1)*st), L - abs(s - (j - 1)*st)) for j in js); dk <= 6.0 ? 1.0 : dk <= 12.0 ? 1.0 - (dk - 6.0)/6.0 : 0.0)
+    avg(s) = (q = [at(s + j*st) for j in -3:3]; (sum(first, q)/7, sum(last, q)/7))
+    out = copy(pts); nmv = 0; dmx = 0.0
+    for i in 1:m
+        wi = w(cum[i]); wi > 0 || continue
+        a = avg(cum[i]); p = pts[i]; out[i] = (p[1] + wi*(a[1] - p[1]), p[2] + wi*(a[2] - p[2]))
+        nmv += 1; dmx = max(dmx, wi*hypot(a[1] - p[1], a[2] - p[2]))
+    end
+    println("  [", label, "] de-jogged: ", length(js), " spike(s) (worst ", round(kmax, digits = 3), " /m at s ", round(Int, smax), "), ",
+            nmv, " node(s) moved, up to ", round(dmx, digits = 2), " m (JM_RAIL_DEJOG=0 keeps them)")
+    out
+end
+
 """Build the racing-ribbon TrackSurface from the centreline, lifted to ground height.
 
 SEAM-1 (PO 2026-09-26: "seams in the road surface, where the track is piecewise linear rather than

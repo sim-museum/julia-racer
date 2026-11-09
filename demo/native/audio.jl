@@ -43,6 +43,14 @@ include(joinpath(@__DIR__, "classicroot.jl"))
 const CLASSIC_ENGINE_WAV = joinpath(classic_root(), "sound", "66fordV8.wav")
 const CLASSIC_ENGINE_RPM = 5200.0
 
+const CAR_ENGINE_WAV = Dict("lotus" => "66fordV8", "eagle" => "66wesV12", "ferrari" => "66ferV12", "brabham" => "66repV8",
+                            "cooper" => "66masaV12", "honda" => "66honV12", "brm" => "66brmH16")
+"""ENGINESOUND-1: the Classic engine loop of '67 car `car` (the Lotus's when unknown or missing)."""
+function engine_wav(car::AbstractString)
+    p = joinpath(classic_root(), "sound", get(CAR_ENGINE_WAV, lowercase(strip(car)), "66fordV8") * ".wav")
+    isfile(p) ? p : CLASSIC_ENGINE_WAV
+end
+
 "Linear-resample mono Float32 audio from `sr` to 44.1 kHz (so playback pitch math is clean)."
 function resample44k(data::Vector{Float32}, sr)
     sr == 44100 && return data

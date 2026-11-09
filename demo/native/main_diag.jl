@@ -504,6 +504,7 @@ function shots_step!(frames, vp, eye, W, H, place_at_s!, shot_idx, shot_t0, shot
                 shot_idx[] += 1; shot_t0[] = frames + 1
                 nxt = SHOTS[shot_idx[]]; CTL.view = nxt.view
                 for (k, v) in nxt.env; ENV[k] = v; end
+                STALL_HOLD[] = false
                 place_at_s!(nxt.s, parse(Float64, get(ENV, "JM_SHOT_LAT", "0")))
             else
                 shots_done[] = true
@@ -814,5 +815,17 @@ function wheelgap_probe(cs, ai_poses)
         println("  [wheelgap]      AI ", k, "  ", wgap(p[2], p[1], p[3]), " m")
     end
     flush(stdout)
+    nothing
+end
+
+const ICONIFY_AT = (p_ = split(get(ENV, "JM_ICONIFY_AT", ""), ":"); length(p_) == 2 ? (parse(Float64, p_[1]), parse(Float64, p_[2])) : (-1.0, 0.0))
+const ICONIFY_STATE = Ref(0)
+function iconify_hook!(t)
+    ICONIFY_AT[1] < 0 && return nothing
+    if ICONIFY_STATE[] == 0 && t >= ICONIFY_AT[1]
+        GLFW.IconifyWindow(win); ICONIFY_STATE[] = 1; println("  [iconify] minimised at t ", round(t, digits = 2)); flush(stdout)
+    elseif ICONIFY_STATE[] == 1 && t >= ICONIFY_AT[1] + ICONIFY_AT[2]
+        GLFW.RestoreWindow(win); ICONIFY_STATE[] = 2; println("  [iconify] restored at t ", round(t, digits = 2)); flush(stdout)
+    end
     nothing
 end

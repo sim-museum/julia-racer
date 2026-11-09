@@ -221,6 +221,11 @@ pitstop_reset!() = (PITSTOP[] = (:none, -Inf); MEATBALL_T[] = -Inf; MEATBALL_DMG
 function in_pit_box(x, z, T, CLINE)
     if T !== nothing && haskey(T.lines, CLASSICAI.PIT) && isfinite(PIT_BOX[])
         (sg, d, h) = CLASSICAI.tlocate(T, x, z, PIT_PH[]); PIT_PH[] = h
+        stl = my_stall()
+        if stl !== nothing
+            (sd, sl) = stl
+            return abs(mod(sg - sd + T.lap/2, T.lap) - T.lap/2) <= 6.0 && abs(d - sl) < 3.5
+        end
         lo = PIT_BOX[] - 30.0; hi = (isfinite(PIT_END[]) ? PIT_END[] : PIT_BOX[] + 60.0) + 20.0
         return mod(sg - lo, T.lap) <= hi - lo && abs(d - CLASSICAI.dlat(T.lines[CLASSICAI.PIT], sg)) < 5.0
     end
@@ -238,6 +243,12 @@ function pitstop_step!(cs, t::Float64, T, CLINE, refuel!, thr::Float64 = 0.0)
             sb = PIT_BOX[] + 0.5*((isfinite(PIT_END[]) ? PIT_END[] : PIT_BOX[] + 60.0) - PIT_BOX[]); w = CLASSICAI.tworld(T, sb, CLASSICAI.dlat(T.lines[CLASSICAI.PIT], sb))
             pc = RaceAI.project(CLINE, w[1], w[2])
             println("  [pitstop] pit boxes: Classic ", round(Int, PIT_BOX[]), "-", round(Int, PIT_END[]), " m; their middle at centreline s ", round(pc[1], digits = 1), " lat ", round(pc[2], digits = 1))
+            stl = my_stall()
+            if stl !== nothing
+                w0 = CLASSICAI.tworld(T, stl[1], stl[2]); p0 = RaceAI.project(CLINE, w0[1], w0[2])
+                println("  [pitstop] your stall (stall_", my_stall_index(), "): Classic ", stl[1], " m, lateral ", stl[2], "; at centreline s ", round(p0[1], digits = 1), " lat ", round(p0[2], digits = 1),
+                        HUMAN_STALLS[] > 1 ? string("; ", HUMAN_STALLS[], " stalls held for humans") : "")
+            end
         else
             println("  [pitstop] no pit line: the pit box is within 150 m of the start/finish line")
         end
@@ -338,6 +349,18 @@ function rai_obslane(line; ds = 2.0)
     wmin = minimum((min(hi[j], RaceAI.LANE_MAX) - max(lo[j], -RaceAI.LANE_MAX) for j in 1:n); init = Inf)
     println("  [ailane] obstacle lane limits: ", used, " obstacles beside the line, ", across, " across it skipped; ", nlim, " of ", n,
             " stations bounded (", narrow, " too narrow left free); narrowest lane span ", round(wmin, digits = 1), " m (JM_RAI_OBSLANE=0: off)")
+    if haskey(ENV, "JM_RAI_OBSLANE_DIAG")
+        r_ = parse.(Float64, split(ENV["JM_RAI_OBSLANE_DIAG"], ":"))
+        for x in r_[1]:10.0:r_[2]
+            j = mod(floor(Int, mod(x, L)/ds), n) + 1
+            println("  [ailane] s ", x, " lo ", round(lo[j], digits = 2), " hi ", round(hi[j], digits = 2))
+        end
+        for k in eachindex(SOLIDS)
+            (ox, oz, r, _) = SOLIDS[k]; pc = RaceAI.project(line, ox, oz)
+            r_[1] - 20 <= pc[1] <= r_[2] && abs(pc[2]) <= 14.0 && println("  [ailane]   solid ", k, " at s ", round(pc[1], digits = 1), " lat ", round(pc[2], digits = 2),
+                                                                     " r ", round(r, digits = 2), k <= length(SOLIDBOX) && SOLIDBOX[k] !== nothing ? " box" : "")
+        end
+    end
     flush(stdout)
     (ds, lo, hi)
 end
@@ -586,7 +609,7 @@ function restart_session!(cs, cs0, groundz, groundz_phys, AICARS, AILINE, CLINE,
     CLUTCH_GATE[] = -1.0
     TELLTALE[] = 0.0
     gearbox_restore!()
-    empty!(AI_COOL); empty!(RAI_COOL); empty!(RAI_PITH); rai_nosnap_reset!()
+    empty!(AI_COOL); empty!(RAI_COOL); empty!(RAI_STALL_OF); empty!(RAI_PITH); rai_nosnap_reset!()
     BLUE_UNTIL[] = -1.0
     inc_reset!()
     FFB_ARMED[] = false; FFB_STEER0[] = NaN; FFB_HELD[] = 0.0
@@ -631,7 +654,7 @@ function instant_replay_reset!()
     WRECKED[] = false; WRECK_FROZEN[] = false; AIRBORNE[] = false; WBODY[] = nothing; empty!(LOOSE_WHEELS); empty!(LOOSE_OF)
     ai_wheeloff_reset!()
     CLUTCH_GATE[] = -1.0; TELLTALE[] = 0.0; STUCK_T0[] = -1.0; RACEEND_T0[] = -1.0; WHEELOFF_MSG[] = 0.0; REP_BODY[] = (NaN, NaN)
-    empty!(AI_COOL); empty!(RAI_COOL); empty!(RAI_PITH); rai_nosnap_reset!(); DriveRT3D.damage_reset!(); pitstop_reset!()
+    empty!(AI_COOL); empty!(RAI_COOL); empty!(RAI_STALL_OF); empty!(RAI_PITH); rai_nosnap_reset!(); DriveRT3D.damage_reset!(); pitstop_reset!()
     nothing
 end
 
@@ -693,6 +716,7 @@ function player_drive_step!(cs, inp, dt, rst, groundz, groundz_phys, roll_ter, f
     DS_SIM[1] += time() - _tps
 
     (WRECKED[] && WRECK_FROZEN[] && WRECK_PIN && CAR3D) && DriveRT3D.pin3d!(cs, WRECK_PX[], WRECK_PZ[], WRECK_PT[], WRECK_PH[])
+    (STALL_HOLD[] && CAR3D && !WRECKED[] && isfinite(STALL_PIN[][1])) && DriveRT3D.pin3d!(cs, STALL_PIN[][1], STALL_PIN[][2], STALL_PIN[][3], NaN)
 
     if AIRBODY && CRASHBODY && CAR3D && !WRECKED[] && !rst && !SKIDPAD && maximum(cs.rh) > AIRBODY_RH
         AIRBORNE[] = true; AIR_LAND[] = 0.0; AIR_PEAK[] = (0.0, 0.0); ctrace_start!("launch")
@@ -864,6 +888,8 @@ function player_car_draw!(cs, inp, vp, bodyModel, wheelmat, loosemat, REPLAY, re
                         ")  tip-foot (mesh) ", round.(T.shtip .- T.shp; digits = 3)); flush(stdout)
             end
 
+            _wtop = !isempty(T.name) && occursin(T.name, get(ENV, "JM_TEAM_WHEEL_TOP", "brm"))
+            _wtop && glDepthRange(0.5, 1.0)
             top && glDepthFunc(GL_ALWAYS)
             for it in T.shift; Render.draw(prog, it, vp, sm; bright=0.95, ambfill=0.45); end
             top && glDepthFunc(GL_GEQUAL)
@@ -881,6 +907,7 @@ function player_car_draw!(cs, inp, vp, bodyModel, wheelmat, loosemat, REPLAY, re
                 for it in T.hands; Render.draw(prog, it, vp, wm; bright=GLOVE_LIGHT[1], spec=GLOVE_LIGHT[2], ambfill=GLOVE_LIGHT[3]); end
             end
             isempty(_hc) || (glCullFace(GL_BACK); _hw || glDisable(GL_CULL_FACE))
+            _wtop && glDepthRange(0.0, 1.0)
         end
     end
 
@@ -1180,7 +1207,26 @@ function body_camera_step!(cs, inp, dt, v_prev, pitch_ter, roll_ter, pitch_dyn, 
     (; v_prev, pitch_ter, roll_ter, pitch_dyn, rollv, cam_pitch, cam_roll, vp, eye, carModel, tiltModel, bodyModel)
 end
 
-function shadow_pass_step!(cs, depthprog, shadowfbo, bodyModel, wheelmat, loosemat, ai_poses, AICHASSIS, spin)
+"""TD261108-6 (PO 2026-11-08 Zandvoort, the Brabham: "separation, visible gap, between wheel and wheel shadow ... at the same
+place on the track every lap"): the shadow pass cast the LOTUS (its body and its wheels at the Lotus's wheel positions) under
+whichever chassis was drawn, so a chosen car's tyres stood off their shadows wherever the sun put the shadow beside the car
+(each lap at the same headings, on every track). The chosen chassis now casts its own body and wheels, as
+player_chassis_draw! draws them."""
+function player_chassis_depth!(dp, cm::Render.CLASSICCarModel, tiltModel, carModel, δ::Float32, spin::Float64)
+    Hm = ai_hand(cm)
+    bm = tiltModel * Hm * Render.translate(cm.body_off[1], cm.body_off[2], cm.body_off[3])
+    for it in cm.body; Render.draw_depth(dp, it, bm); end
+    for it in get(AI_AXLES, cm.name, AI_NOAXLE); Render.draw_depth(dp, it, carModel * Hm); end
+    for (i, (wx, wz, front, r, nm)) in enumerate(cm.wheelspec)
+        i <= 4 && is_loose(WHEEL_NAMES[i]) && continue
+        for it in cm.wheels[nm]
+            Render.draw_depth(dp, it, carModel * Hm * Render.translate(wx, r, wz) * (front ? Render.roty(Float32(HSIGN)*δ) : Render.ident()) * Render.rotz(Float32(spin)))
+        end
+    end
+    nothing
+end
+
+function shadow_pass_step!(cs, depthprog, shadowfbo, bodyModel, wheelmat, loosemat, ai_poses, AICHASSIS, spin, tiltModel, carModel, δ)
     lightVP = Render.light_vp(Float32[cs.x, cs.y, -cs.z], LIGHTDIR)
     Render.shadow_pass(depthprog, shadowfbo, lightVP) do dp
 
@@ -1188,10 +1234,15 @@ function shadow_pass_step!(cs, depthprog, shadowfbo, bodyModel, wheelmat, loosem
             TRACKCULL_SH && !inlightbox(lightVP, TRACKBOUND[ti][1], TRACKBOUND[ti][2]) && continue
             Render.draw_depth(dp, it, Render.IDENT)
         end
-        for it in carItems; Render.draw_depth(dp, it, bodyModel); end
-        for (wx,wz,steer,r,nm) in WHEELS, it in WHEELITEMS[nm]
-            is_loose(nm) && continue
-            Render.draw_depth(dp, it, wheelmat(wx,wz,steer,r,nm))
+        pcm = PLAYER_CM[]
+        if pcm !== nothing && PLAYER_MINE[]
+            player_chassis_depth!(dp, pcm, tiltModel, carModel, Float32(δ), Float64(spin))
+        else
+            for it in carItems; Render.draw_depth(dp, it, bodyModel); end
+            for (wx,wz,steer,r,nm) in WHEELS, it in WHEELITEMS[nm]
+                is_loose(nm) && continue
+                Render.draw_depth(dp, it, wheelmat(wx,wz,steer,r,nm))
+            end
         end
         for (lx,ly,lz,_,_,_,sp,_,nm) in LOOSE_WHEELS, it in loose_items(nm)
             Render.draw_depth(dp, it, loosemat(lx,ly,lz,sp))
@@ -1215,6 +1266,30 @@ function mirror_gate(REPLAY, frames)
     (mirror_live, _mir_alt)
 end
 
+const CONTACT_PTS = NTuple{3,Float32}[]
+const CONTACT_HUBS = ((1.05, 0.72), (1.05, -0.72), (-1.38, 0.74), (-1.38, -0.74))
+function contact_shadows!(cs, ai_poses)
+    v = get(ENV, "JM_CONTACT_SHADOW", "0.45,0.34,0.35")
+    v == "0" && return nothing
+    f = split(v, ","); k = (parse(Float32, f[1]), parse(Float32, get(f, 2, "0.34")), parse(Float32, get(f, 3, "0.35")))
+    empty!(CONTACT_PTS)
+    function car!(x, y, z, th)
+        c = cos(th); s_ = sin(th)
+        for (lx, lz) in CONTACT_HUBS
+            push!(CONTACT_PTS, (Float32(x + lx*c + lz*s_), Float32(y), Float32(-z - lx*s_ + lz*c)))
+        end
+    end
+    WRECKED[] || car!(cs.x, cs.y, cs.z, cs.θ)
+    if ai_poses !== nothing
+        for q in ai_poses
+            length(CONTACT_PTS) >= 32 && break
+            (isfinite(q[1]) && isfinite(q[2])) && car!(q[1], q[2], q[3], q[4])
+        end
+    end
+    Render.set_contacts!(prog, CONTACT_PTS, k)
+    nothing
+end
+
 function main_pass_begin!(vp, eye, lightVP)
     glViewport(0,0,W,view_h())
     glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE); glDepthFunc(GL_GEQUAL); glClearDepth(0.0)
@@ -1230,7 +1305,7 @@ end
 function hud_draw_step!(cs, inp, tc_hud, last_lap, best_lap, cd_armed, cd_left, race_go, phase, race_done, player_finpos, HOLD_START)
     glViewport(0,0,W,H)
     Render.hud_draw(hudprog, hudvao, hudvbo,
-        Render.compose_hud(W, H, cs.v*3.6, cs.gear, cs.rpm, 9500.0, inp.throttle, inp.brake, inp.clutch, tc_hud;
+        Render.compose_hud(W, H, cs.v*3.6, cs.gear, cs.rpm, 9500.0*DriveRT3D.CAR[].kR, inp.throttle, inp.brake, inp.clutch, tc_hud;
                            band=BAND_H,
                            lastlap=(FONT === nothing ? (SMOKE ? 94.3 : last_lap) : 0.0),
                            bestlap=(FONT === nothing ? (SMOKE ? 92.1 : best_lap) : 0.0), manual=!CTL.auto,
@@ -1397,8 +1472,22 @@ function respawn_step!(cs, cs0, groundz, groundz_phys, PLAYER_G)
     nothing
 end
 
+const REP_GDIAG = get(ENV, "JM_REPLAY_GROUNDDIAG", "0") != "0"
+const REP_GDIAG_N = Ref(0)
+function rep_ground_diag!(cs, raw, groundz)
+    REP_GDIAG_N[] += 1
+    g0 = groundz(cs.x, cs.z; hold = false)
+    (REP_GDIAG_N[] % 60 == 1) && println("  [repground] t ", round(REP_ELAPSED[][1], digits = 2), " you: ", round(cs.y - g0, digits = 2), " m over the ground")
+    for (k, a) in enumerate(raw)
+        g = groundz(a[1], a[3]; hold = false)
+        (g > -900 && a[2] - g > 0.25) && println("  [repground] t ", round(REP_ELAPSED[][1], digits = 2), " AI ", k, " at (", round(a[1], digits = 1), ", ",
+                                                round(a[3], digits = 1), ") ", round(a[2] - g, digits = 2), " m over the ground (y ", round(a[2], digits = 2), ", ground ", round(g, digits = 2), ")")
+    end
+    nothing
+end
 function ai_poses_step!(cs, ddt, ai_hit, rep_ai_raw, AICARS, AIPHYS, CLASSICAI_T, phase, race_go, race_done, ai_release, aibankP, aibankK, ai_ground, groundz, groundz_ai, ai_onroad, ai_stuck, CLASSICAI_PD, CLASSICAI_PH, CLASSICAI_SC, ent_name, classicai_field!, REPLAY, AILINE, AI_SCALE)
     ai_poses = if REPLAY
+        REP_GDIAG && rep_ground_diag!(cs, rep_ai_raw, groundz)
         NTuple{6,Float64}[(a[1], a[2], a[3], a[4], isfinite(a[5]) ? a[5] : 0.0, isfinite(a[6]) ? a[6] : 0.0) for a in rep_ai_raw]
     elseif AILINE === nothing || phase[] != :race
         NTuple{6,Float64}[]
@@ -1517,8 +1606,8 @@ function autodrive_step!(cs, CLINE, frames, dt, groundz, inp, ONTRACK)
     let (s0, lat0) = RaceAI.project(CLINE, cs.x, cs.z)
 
         if TRACE_DS
-            DS_PREV[] >= 0.0 && ds_note!(s0 - DS_PREV[], cs.v, dt, CLINE.total)
-            DS_PREV[] = s0
+            AD_SPREV[] >= 0.0 && ds_note!(s0 - AD_SPREV[], cs.v, dt, CLINE.total)
+            AD_SPREV[] = s0
         end
 
         yawrate = try; y = AIyaw(cs); isfinite(y) ? y : 0.0; catch; 0.0; end
@@ -1606,8 +1695,9 @@ function autodrive_step!(cs, CLINE, frames, dt, groundz, inp, ONTRACK)
         if AUTODRIVE_MANUAL && !CTL.auto
             h = ADM[].hold
             if h == 0
-                up = cs.gear == 0 || (cs.rpm > 8700 && cs.gear < 5)
-                dn = !up && cs.gear > 1 && cs.rpm < 4300 && brk > 0.1
+                rb_ = cs.rpm/DriveRT3D.CAR[].kR
+                up = cs.gear == 0 || (rb_ > 8700 && cs.gear < DriveRT3D.ngears())
+                dn = !up && cs.gear > 1 && rb_ < 4300 && brk > 0.1
                 (up || dn) && (ADM[] = (hold = 8, up = up, dn = dn))
             end
             h = ADM[].hold; ADM[] = (hold = max(h - 1, 0), up = ADM[].up, dn = ADM[].dn)
@@ -1690,6 +1780,7 @@ function replay_step!(cs, inp, dt, REP_AICOCKPIT, REP_NT, REP_TEAMCOCKPIT, rep_a
     !_sh && key(GLFW.KEY_LEFT)  && (rep_rt[] = clamp(rep_rt[] - 8*dt, 0.0, rep_dur))
     rep_play[] && (rep_rt[] = clamp(rep_rt[] + dt*rep_speed[], 0.0, rep_dur))
     (rep_play[] && rep_rt[] >= rep_dur - 1e-6) && (rep_play[] = false)
+    REP_ELAPSED[] = (rep_rt[], rep_dur)
     cf = key(GLFW.KEY_C); (cf && !rep_pn[]) && (rep_focus[] = mod(rep_focus[]+1, repd.ncar)); rep_pn[] = cf
     cvv = key(GLFW.KEY_V); (cvv && !rep_pv[]) && (rep_cam[] = mod1(rep_cam[]+1, length(REPLAY_CAMS))); rep_pv[] = cvv
     (pp, rep_ai_raw) = replay_poses(rep_rt[])
@@ -1999,7 +2090,8 @@ function ai_contact_step!(cs, ai_poses, AICARS, AIPHYS, PLAYER_CDA, ffb_jolt)
             println("  [carhit-trace] t ", round(cs.t, digits = 3), " AI ", k, " lat ", round(lat, digits = 2), " parts ", pp,
                     " jn ", round(j), " dv ", round(hypot(pdvx, pdvz), digits = 2), " dr ", round(pdr, digits = 2),
                     " heave ", round(imp[5], digits = 2), " roll ", round(imp[6], digits = 2), " pitch ", round(imp[7], digits = 2),
-                    " airborne ", AIRBORNE[], " wrecked ", WRECKED[])
+                    " airborne ", AIRBORNE[], " wrecked ", WRECKED[],
+                    " you (", round(cs.x, digits = 2), ", ", round(cs.z, digits = 2), ") AI (", round(p[1], digits = 2), ", ", round(p[3], digits = 2), ")")
         end
         player_bump!(cs, pdvx, pdvz, pdr, imp[5], imp[6], imp[7])
         hypot(pdvx, pdvz) > 1.5 && incident!(cs.x, cs.z, string("you and AI ", k, " touched"))
@@ -2051,6 +2143,7 @@ function crash_step!(cs, frames, place_at_s!, crash_i, crash_invis, crash_jit, c
         crash_i[] += 1
         if crash_i[] <= length(CRASHES)
             (s0, sd, ang, vv) = CRASHES[crash_i[]]
+            STALL_HOLD[] = false
             place_at_s!(s0)
             CRASH_KEEPDMG || DriveRT3D.damage_reset!()
             WRECKED[] = false; WRECK_FROZEN[] = false; AIRBORNE[] = false; empty!(LOOSE_WHEELS); DC[].lastz = 0.0
@@ -2465,9 +2558,15 @@ function drawworld_impl!(vp_, eye_, flip::Bool, cs, AICHASSIS, _tp_d, aiBody, ai
             _fol = _ovg !== nothing && _ii <= length(_ovg) && _ovg[_ii]
             _bd = _obd !== nothing && _ii <= length(_obd) && _obd[_ii]
             (_bd && _bdfar) && continue
+            _bdc = _bd && BACKDROP_CULL > 0 && startswith(onm, "tierg")
+            if _bdc
+                _bden = glIsEnabled(GL_CULL_FACE) == GL_TRUE; glGetIntegerv(GL_CULL_FACE_MODE, BD_CFM)
+                glEnable(GL_CULL_FACE); glCullFace(xor(BACKDROP_CULL == 1, flip) ? GL_BACK : GL_FRONT)
+            end
             Render.draw(prog, it, vp_, mat; bright = _fol ? TRACK_BRIGHT*VEG_GAIN*TERR_B : (OBJ_FLAT[1] > 0f0 ? 1f0 : ob),
                         ambfill = _fol || OBJ_FLAT[1] > 0f0 ? (_fol ? TRACK_AMB*VEG_GAIN*TERR_A : 0f0) : oa, graze=grz || _bd, tint=otint,
                         flat = _fol ? (0f0, 0f0) : OBJ_FLAT)
+            _bdc && (_bden ? glCullFace(GLenum(BD_CFM[])) : glDisable(GL_CULL_FACE))
         end
         end
         _ocl === nothing || Render.clip_planes!(prog, nothing)
@@ -2835,6 +2934,8 @@ function classicai_poses!(cs, ddt, ai_hit, AICARS, AILINE, CLASSICAI_PD, CLASSIC
     end
 
     ai_cooldown_step!(f, AICARS, CLASSICAI_T, crossed, ent_name, phase, race_done, race_go)
+    classicai_stall_step!(f, CLASSICAI_T)
+    classicai_mistake_step!(f, CLASSICAI_T)
     poses
 end
 
@@ -2931,7 +3032,7 @@ sides, the car holds the middle. Returns (lo, hi) in the rail's lateral frame (+
 (s, lateral) on the rail."""
 function rai_walls!(i, AICARS, ppr, pv, dt)
     me = AICARS[i]; total = RAI_TOTAL[]
-    W = RAI_CAR_W; L = RAI_CAR_L; agg = RAI_AGGR
+    W = RAI_CAR_W; L = RAI_CAR_L; agg = rai_aggr(i)
     clr = 1.5W + 1.0 - agg
     length(RAI_SIDEMEM) < i && append!(RAI_SIDEMEM, [(lo = (-Inf, -Inf), hi = (Inf, -Inf)) for _ in length(RAI_SIDEMEM)+1:i])
     m = RAI_SIDEMEM[i]; t = RAI_CLOCK[]
@@ -2972,8 +3073,8 @@ cap + w (free - cap). Replaces the line planner's hold-station (0.6 s + a car le
 which kept followers just outside the 26 m slipstream. `ppr` = the player's (s, lateral), `pv` its speed."""
 function rai_follow_cap(i, AICARS, AIPHYS, ppr, pv, free; skip::Int = -1)
 
-    me = AICARS[i]; total = RAI_TOTAL[]; a = RAI_BRAKE_PLAN
-    margin = RAI_FOLLOW_MARGIN * (1.05 - RAI_AGGR) / 0.55
+    me = AICARS[i]; total = RAI_TOTAL[]; a = RAI_BRAKE_PLAN*rai_brake_k(i)
+    margin = RAI_FOLLOW_MARGIN * (1.05 - rai_aggr(i)) / 0.55
     best = free; kb = -1
     for k in 0:length(AICARS)
         k == i && continue
@@ -3012,13 +3113,138 @@ function rai_limiter!(i, lap)
     lap < until ? RAI_MINSKILL[i] : 1.0
 end
 
+const RAI_BRAKE_K = Float64[]
+const RAI_PROFS = Dict{Float64,NTuple{2,Tuple{Vector{Float64},Vector{Float64}}}}()
+rai_brake_k(i) = 1 <= i <= length(RAI_BRAKE_K) ? RAI_BRAKE_K[i] : 1.0
+"Set each AI car's braking factor from its chassis (`names`, AISPECS order); the Lotus's mass is the session's."
+function rai_brake_k!(names)
+    empty!(RAI_BRAKE_K)
+    on = get(ENV, "JM_RAI_BRAKE_PERCAR", "1") != "0"; mL = DriveRT3D.MASS[]
+    for nm in names
+        cp = get(DriveRT3D.CAR_PHYS, nm, nothing)
+        push!(RAI_BRAKE_K, (on && cp !== nothing && DriveRT3D.ai_carphys_on()) ? round((mL/(mL + cp.dm))^1.2, digits = 2) : 1.0)
+    end
+    any(!=(1.0), RAI_BRAKE_K) && (println("  [aiphys] braking plan per chassis (x the Lotus's ", round(RAI_BRAKE_PLAN, digits = 1), " m/s2): ",
+                                          join((string(nm, " ", k) for (nm, k) in zip(names, RAI_BRAKE_K)), ", ")); flush(stdout))
+    nothing
+end
+function rai_profs_percar!(line)
+    empty!(RAI_PROFS)
+    for k in unique(RAI_BRAKE_K)
+        k == 1.0 && continue
+        RAI_PROFS[k] = (rai_profile(line, RAI_AMAX_PLAN, RAI_BRAKE_PLAN*k), rai_profile(line, RAI_AMAX_PLAN, RAI_BRAKE_PLAN*k*RAI_LATE))
+    end
+    nothing
+end
+
+const RAI_APEXDIAG = get(ENV, "JM_RAI_APEXDIAG", "0") != "0"
+const RAI_APEX_K = Dict{Int,Int}()
+function rai_apex_diag!(i, s, v)
+    RAI_PROF[] === nothing && return nothing
+    (fs, fv) = RAI_PROF[]; n = length(fv); k = clamp(floor(Int, mod(s, RAI_TOTAL[])/fs[2]) + 1, 1, n)
+    k0 = get(RAI_APEX_K, i, k); RAI_APEX_K[i] = k
+    (k == k0 || mod(k - k0, n) > 10) && return nothing
+    for j in 1:mod(k - k0, n)
+        q = mod1(k0 + j, n)
+        if fv[q] < 45.0 && fv[q] <= fv[mod1(q - 1, n)] && fv[q] < fv[mod1(q + 1, n)]
+            println("  [apex] AI ", i, " ", AISPECS[mod1(i, length(AISPECS))][1], " s ", round(Int, fs[q]), " v ", round(3.6v, digits = 1), " vmin ", round(3.6fv[q], digits = 1)); flush(stdout)
+        end
+    end
+    nothing
+end
+
+const RAI_VLAT = max(something(tryparse(Float64, get(ENV, "JM_RAI_VLAT", "4.0")), 4.0), 0.0)
+
+const RAI_LATDIAG = get(ENV, "JM_RAI_LATDIAG", "0") != "0"
+const RAI_LATD = Dict{Int,Tuple{Float64,Float64}}()
+
+const RAI_PATHK = get(ENV, "JM_RAI_PATHK", "0") != "0"
+const RAI_SDIAG = (p_ = split(get(ENV, "JM_RAI_SDIAG", ""), ":"); length(p_) == 2 ? (something(tryparse(Float64, p_[1]), 0.0), something(tryparse(Float64, p_[2]), 0.0)) : (0.0, 0.0))
+const RAI_SDIAG_T = Dict{Int,Float64}()
+function rai_s_diag!(i, s, lane, tl, lo, hi, v, vp, thr, brk, st)
+    (RAI_SDIAG[1] <= s <= RAI_SDIAG[2]) || return nothing
+    t = RAI_CLOCK[]; t - get(RAI_SDIAG_T, i, -1.0) < 0.1 && return nothing
+    RAI_SDIAG_T[i] = t; r(x) = round(x, digits = 2)
+    println("  [sdiag] ", r(t), " ", i, " ", round(s, digits = 1), " lane ", r(lane), " tgt ", r(tl), " [", r(lo), ", ", r(hi), "] v ", round(3.6v, digits = 1),
+            " plan ", round(3.6vp, digits = 1), " thr ", r(thr), " brk ", r(brk), " st ", round(st, digits = 3))
+    nothing
+end
+function rai_lat_diag!(i, lane, v)
+    t = RAI_CLOCK[]; (t0, l0) = get(RAI_LATD, i, (-1.0, lane))
+    t - t0 < 0.25 && return nothing
+    RAI_LATD[i] = (t, lane)
+    (t0 >= 0 && v > 55.0 && t - t0 < 0.5) && println("  [latv] ", i, " ", round(3.6v, digits = 0), " ", round(abs(lane - l0)/(t - t0), digits = 2))
+    nothing
+end
+
+const AI_SKILL_PLAN = get(ENV, "JM_AI_SKILL_PLAN", "1") != "0"
+const RAI_MISTAKE_RATE = max(something(tryparse(Float64, get(ENV, "JM_AI_MISTAKES", "0.1")), 0.1), 0.0)
+const RAI_MRATE = Float64[]
+const RAI_MNEXT = Float64[]
+const RAI_MIST = Dict{Int,Tuple{Float64,Float64}}()
+function rai_mistake_rates!(sk)
+    empty!(RAI_MRATE); empty!(RAI_MNEXT); empty!(RAI_MIST)
+    for s in sk
+        f = s === nothing ? 1.0 : max(0.4 + 2.5*(1.03 - 0.5*(s.exper + s.alert))/0.07, 0.2)*max(1.0 + 3.0*(s.aggr - 1.0), 0.5)
+        push!(RAI_MRATE, RAI_MISTAKE_RATE*f); push!(RAI_MNEXT, 60.0)
+    end
+    (RAI_MISTAKE_RATE > 0 && !isempty(sk)) && (println("  [aiskill] mistakes per minute: ", join(["$(AISPECS[mod1(i, length(AISPECS))][6]) $(round(RAI_MRATE[i], digits = 3))" for i in eachindex(RAI_MRATE)], ", ")); flush(stdout))
+    nothing
+end
+"The apex (the profile's slowest station) of the next corner whose braking point is within `reach` m of s at speed v, or NaN."
+function rai_next_apex(i, s, v; reach = 200.0)
+    prof = rai_prof(i, false); prof === nothing && return NaN
+    (fs, fv) = prof; d = fs[2]; n = length(fv); k0 = floor(Int, mod(s, RAI_TOTAL[])/d) + 1
+    jb = -1
+    for j in 0:round(Int, reach/d); fv[mod1(k0 + j, n)] < v - 1.0 && (jb = j; break); end
+    jb < 0 && return NaN
+    ja = jb
+    while ja < jb + round(Int, 400/d) && fv[mod1(k0 + ja + 1, n)] <= fv[mod1(k0 + ja, n)]; ja += 1; end
+    s + ja*d
+end
+"Car i's mistake this frame: its speed factor (1 = none) and whether it drives the late profile."
+function rai_mistake!(i, s, v, onrace::Bool)
+    (RAI_MISTAKE_RATE > 0 && i <= length(RAI_MRATE)) || return (1.0, false)
+    t = RAI_CLOCK[]
+    if onrace && t >= RAI_MNEXT[i]
+        RAI_MNEXT[i] = t + 60.0
+        (!haskey(RAI_MIST, i) && rand(AI_RNG[]) < 1.0 - exp(-RAI_MRATE[i])) && (RAI_MIST[i] = (NaN, 0.5 + rand(AI_RNG[])))
+    end
+    m = get(RAI_MIST, i, nothing); m === nothing && return (1.0, false)
+    onrace || (delete!(RAI_MIST, i); return (1.0, false))
+    if isnan(m[1])
+        a = rai_next_apex(i, s, v); isnan(a) && return (1.0, false)
+        RAI_MIST[i] = (a, m[2]); m = RAI_MIST[i]
+        println("  [mistake] AI ", i, " (", AISPECS[mod1(i, length(AISPECS))][6], ") brakes too late for s ", round(Int, mod(a, RAI_TOTAL[])),
+                " (severity ", round(m[2], digits = 2), ") at t ", round(t, digits = 1)); flush(stdout)
+    end
+    ds = mod(s - m[1] + RAI_TOTAL[]/2, RAI_TOTAL[]) - RAI_TOTAL[]/2
+    ds > 15.0 && (delete!(RAI_MIST, i); return (1.0, false))
+    (1.0 + 0.12*m[2], true)
+end
+"""The Racecraft speed profiles (the plan's, the attacker's late braking, each chassis's own). Built during LOADING (drive_native_mtk.jl,
+after the field's braking factors): built on the race's first frame they compiled 420 ms at the green (warm race, Racecraft, 2026-11-07)."""
+function rai_prof_build!(line)
+    RAI_PROF[] = rai_profile(line, RAI_AMAX_PLAN, RAI_BRAKE_PLAN)
+    RAI_PROF_LATE[] = rai_profile(line, RAI_AMAX_PLAN, RAI_BRAKE_PLAN*RAI_LATE)
+    rai_profs_percar!(line)
+    nothing
+end
+const RAI_PROF_SAID = Ref(false)
+"Car i's speed profile (late = the attacker's later braking): its chassis's own, or the Lotus's."
+function rai_prof(i, late::Bool)
+    k = rai_brake_k(i)
+    k != 1.0 && haskey(RAI_PROFS, k) && return late ? RAI_PROFS[k][2] : RAI_PROFS[k][1]
+    late ? RAI_PROF_LATE[] : RAI_PROF[]
+end
+
 """AISTYLE-1 S13: the next corner from lap distance s at speed v, from the Racecraft speed profile: (distance to where the
 profile first falls under v -- the braking point, 0 = braking now --, the inside of the corner = the racing line's side at
 the profile's first minimum after it: +1 left, -1 right, 0 = the line is within 1 m of the middle there); (Inf, 0) with no
 braking point within `reach` m."""
-function rai_corner_ahead(line, s, v; reach = 400.0)
-    RAI_PROF[] === nothing && return (Inf, 0)
-    (fs, fv) = RAI_PROF[]; d = fs[2]; n = length(fv); total = line.total
+function rai_corner_ahead(line, s, v; reach = 400.0, prof = RAI_PROF[])
+    prof === nothing && return (Inf, 0)
+    (fs, fv) = prof; d = fs[2]; n = length(fv); total = line.total
     k0 = floor(Int, mod(s, total)/d) + 1
     jb = -1
     for j in 0:round(Int, reach/d)
@@ -3045,7 +3271,7 @@ aborts it."""
 function rai_pass!(i, AICARS, AIPHYS, AILINE, ppr, pv, free, dt)
     length(RAI_PS) < i && append!(RAI_PS, [RaiPass(0.0, 0, -1, 0.0, 0.0, false) for _ in length(RAI_PS)+1:i])
     ps = RAI_PS[i]; me = AICARS[i]; total = RAI_TOTAL[]; t = RAI_CLOCK[]
-    W = RAI_CAR_W; L = RAI_CAR_L; agg = RAI_AGGR; clr = 1.5W + 1.0 - agg; v = AIPHYS[i].v
+    W = RAI_CAR_W; L = RAI_CAR_L; agg = rai_aggr(i); clr = 1.5W + 1.0 - agg; v = AIPHYS[i].v
     lanemax = RaceAI.LANE_MAX
 
     (plo, phi) = (RAI_PASSOBS && RAI_OBSLANE && RAI_OBSLIM[] !== nothing) ? rai_obslim(me.s) : (-Inf, Inf)
@@ -3102,7 +3328,7 @@ function rai_pass!(i, AICARS, AIPHYS, AILINE, ppr, pv, free, dt)
             ps.held = max(0.0, ps.held - dt)
         end
 
-        braking = RAI_DEC[i + 1] > 2.0 || (kb != -1 && RAI_DEC[kb + 1] > 2.0) || rai_corner_ahead(AILINE, me.s, v)[1] < v
+        braking = RAI_DEC[i + 1] > 2.0 || (kb != -1 && RAI_DEC[kb + 1] > 2.0) || rai_corner_ahead(AILINE, me.s, v; prof = rai_prof(i, false))[1] < v
         if ps.held >= 2.0 && kb != -1 && t > RAI_PASS_T0 && (stopped || !RAI_ENTRY || !braking)
             (s, lat, vb) = carof(kb); ds = along(s); gap = max(ds - L, 0.0)
 
@@ -3146,7 +3372,7 @@ function rai_pass!(i, AICARS, AIPHYS, AILINE, ppr, pv, free, dt)
 
         if RAI_ENTRY && ps.side == 0 && kb != -1 && !stopped && t > RAI_PASS_T0 && v > 25.0
             (s, lat, vb) = carof(kb); ds = along(s); gap = max(ds - L, 0.0)
-            (db, ins) = rai_corner_ahead(AILINE, me.s, v)
+            (db, ins) = rai_corner_ahead(AILINE, me.s, v; prof = rai_prof(i, false))
             reach = min(RAI_ENTRY_K*v^2/(2RAI_BRAKE_PLAN)*(1.0 - 1.0/RAI_LATE), RAI_ENTRY_GAP)
             tg = lat + ins*clr
 
@@ -3190,7 +3416,7 @@ const RAI_PITDIAG = get(ENV, "JM_RAI_PITDIAG", "0") != "0"
 const RAI_PITDT = Dict{Int,Float64}()
 rai_pit_s(T, i, pc) = ((sg, _, h) = CLASSICAI.tlocate(T, pc.x, pc.z, get(RAI_PITH, i, 0)); RAI_PITH[i] = h; sg)
 """TD261107-1 (7)/(8): AI car `i` in the pit lane for any reason -- the cool-down's box or a repair stop."""
-rai_inpit(i) = (get(RAI_COOL, i, (:race, 0.0))[1] in (:pit, :stop, :parked)) || (get(RAI_REPAIR, i, (:none, 0.0))[1] in (:rpit, :service, :pitout, :dtpit))
+rai_inpit(i) = (get(RAI_COOL, i, (:race, 0.0))[1] in (:pit, :stop, :parked)) || (get(RAI_REPAIR, i, (:none, 0.0))[1] in (:rpit, :service, :pitout, :dtpit, :stall))
 """TD261107-1 (8): damage dv2 (speed squared) for AI car `i` from a contact with car `k` (0 = the player; -1 = a solid, counted
 by the caller); a car past RAI_LIMP_MS limps to the pits for repair."""
 function rai_dmg_add!(i, k, dv2)
@@ -3220,17 +3446,29 @@ function rai_repair_drive!(i, pc, rr, thr, brk, st, AICARS)
     if rr[1] === :dt
         (PIT_IN[] - 60.0 <= sg < PIT_BOX[]) && (RAI_REPAIR[i] = (:dtpit, RAI_CLOCK[]); println("  [blackflag] AI ", i, " into the pit lane for its drive-through"); flush(stdout))
         return (thr, brk, st)
-    elseif rr[1] === :limp
+    elseif rr[1] === :limp || rr[1] === :ppit
         if PIT_IN[] - 60.0 <= sg < PIT_BOX[]
             n = max(length(RAI_TALENT), 1)
             box = (isfinite(PIT_END[]) && PIT_END[] - PIT_BOX[] > 30.0) ? PIT_BOX[] + 10.0 + (PIT_END[] - PIT_BOX[] - 20.0)*(i - 1)/max(n - 1, 1) : PIT_BOX[] + 10.0
-            RAI_REPAIR[i] = (:rpit, box); println("  [repair] AI ", i, " into the pits for repair, box at ", round(Int, box), " m"); flush(stdout)
+            rai_stall(i) === nothing || (box = rai_stall(i)[1])
+            RAI_REPAIR[i] = (:rpit, box); println(i in RAI_PSTOP ? "  [practice] AI " : "  [repair] AI ", i, i in RAI_PSTOP ? " into the pits, box at " : " into the pits for repair, box at ", round(Int, box), " m",
+                                                  rai_stall(i) === nothing ? "" : string(" (stall_", rai_stall_k(i), ")")); flush(stdout)
         end
         return (thr, brk, st)
+    elseif rr[1] === :stall
+        if RAI_CLOCK[] >= rr[2]
+            RAI_REPAIR[i] = (:pitout, RAI_CLOCK[])
+            println("  [pitstall] AI ", i, " leaves its stall (stall_", rai_stall_k(i), ", s ", round(Int, sg), ") at t ", round(RAI_CLOCK[], digits = 1)); flush(stdout)
+        end
+        return (0.0, 1.0, 0.0)
     elseif rr[1] === :service
         if RAI_CLOCK[] >= rr[2]
             delete!(RAI_ABS, i); RAI_REPAIR[i] = (:pitout, RAI_CLOCK[])
-            println("  [repair] AI ", i, " repaired at t ", round(RAI_CLOCK[], digits = 1), " -- leaves its box"); flush(stdout)
+            if i in RAI_PSTOP
+                delete!(RAI_PSTOP, i); println("  [practice] AI ", i, " leaves its stall again at t ", round(RAI_CLOCK[], digits = 1)); flush(stdout)
+            else
+                println("  [repair] AI ", i, " repaired at t ", round(RAI_CLOCK[], digits = 1), " -- leaves its box"); flush(stdout)
+            end
         end
         return (0.0, 1.0, 0.0)
     end
@@ -3240,15 +3478,32 @@ function rai_repair_drive!(i, pc, rr, thr, brk, st, AICARS)
         if !inlane && abs(CLASSICAI.dlat(L, sg) - CLASSICAI.dlat(T.lines[CLASSICAI.RACE], sg)) < 2.0
             delete!(RAI_REPAIR, i); length(RAI_TLS) >= i && (RAI_TLS[i] = AICARS[i].lane)
             println("  [repair] AI ", i, " back in the race at s ", round(Int, AICARS[i].s % RAI_TOTAL[]), " (t ", round(RAI_CLOCK[], digits = 1), ")"); flush(stdout)
+            if !IS_RACE && practice_runs_on()
+                RAI_PRUN[i] = round(Int, practice_rand("JM_PRACTICE_LAPS", "3,7"))
+                println("  [practice] AI ", i, " runs ", RAI_PRUN[i], " laps"); flush(stdout)
+            end
             return (thr, brk, st)
         end
         RAI_CLOCK[] - rr[2] > 90.0 && (delete!(RAI_REPAIR, i); println("  [repair] AI ", i, " gave up the pit line (90 s)"); return (thr, brk, st))
     end
     la = clamp(5.0 + 0.4*pc.v, 5.0, 18.0)
-    w = CLASSICAI.tworld(T, sg + la, rai_pit_dlat(L, sg + la))
+
+    pulling = false
+    if rr[1] === :pitout && PIT_BOX[] - 20.0 <= sg <= PIT_END[] + 30.0
+        (_, dlc, _) = CLASSICAI.tlocate(T, pc.x, pc.z, get(RAI_PITH, i, 0))
+        pulling = abs(dlc - rai_pit_clear_dlat(L, sg + 4.0)) > 0.6
+        pulling && (la = 4.0)
+    end
+    dl_ = rr[1] === :rpit ? rai_pit_target_dlat(L, sg + la, i, mod(rr[2] - sg + T.lap/2, T.lap) - T.lap/2 - la) : rr[1] === :pitout ? rai_pit_clear_dlat(L, sg + la) : rai_pit_dlat(L, sg + la)
+    w = CLASSICAI.tworld(T, sg + la, dl_)
     herr = atan(sin(atan(w[2] - pc.z, w[1] - pc.x) - pc.θ), cos(atan(w[2] - pc.z, w[1] - pc.x) - pc.θ))
     κ = 2.0*sin(herr)/max(hypot(w[1] - pc.x, w[2] - pc.z), 1.0)
     st = clamp((atan(2.41κ) + 0.06*(pc.v*κ - AIyaw(pc)))/0.30, -1.0, 1.0)
+    if RAI_PITDIAG && rr[1] === :pitout && (RAI_CLOCK[] - get(RAI_PITDT, i, -Inf) >= 0.25)
+        RAI_PITDT[i] = RAI_CLOCK[]; (_, dlc, _) = CLASSICAI.tlocate(T, pc.x, pc.z, get(RAI_PITH, i, 0))
+        println("  [pitout] t=", round(RAI_CLOCK[], digits = 2), " AI ", i, " s ", round(sg, digits = 1), " dlat ", round(dlc, digits = 2), " target ", round(dl_, digits = 2),
+                " (pit line ", round(rai_pit_dlat(L, sg + la), digits = 2), ") v ", round(3.6pc.v, digits = 1), " km/h steer ", round(st, digits = 2), " world (", round(pc.x, digits = 2), ", ", round(pc.z, digits = 2), ")")
+    end
     if rr[1] === :dtpit
         rem = Inf; vt = min(CLASSICAI.lspeed(L, sg), 16.0)
         if isfinite(PIT_END[]) && 5.0 < mod(sg - PIT_END[], T.lap) < 200.0
@@ -3259,17 +3514,188 @@ function rai_repair_drive!(i, pc, rr, thr, brk, st, AICARS)
         vt = min(CLASSICAI.lspeed(L, sg), 16.0, sqrt(2.0*2.5*max(rem - 1.5, 0.0)))
     else
         rem = Inf; vt = (PIT_BOX[] - 20.0 <= sg <= PIT_END[] + 30.0) ? 16.0 : 30.0
+        pulling && (vt = 3.0)
     end
     thr = pc.v < vt ? clamp((vt - pc.v)*0.3, 0.0, rr[1] === :pitout ? 0.8 : 0.5) : 0.0
     brk = pc.v > vt + 0.5 ? clamp((pc.v - vt)*0.4, 0.0, 1.0) : 0.0
     if rr[1] === :rpit && (rem < 1.5 || (rem < 6.0 && pc.v < 0.5))
         thr = 0.0; brk = 1.0
         if pc.v < 0.3
-            RAI_REPAIR[i] = (:service, RAI_CLOCK[] + RAI_SERVICE_S)
-            println("  [repair] AI ", i, " stopped at its box (s ", round(Int, sg), "): service ", RAI_SERVICE_S, " s"); flush(stdout)
+            if i in RAI_PSTOP
+                ps_ = practice_rand("JM_PRACTICE_PAUSE", "60,240")
+                RAI_REPAIR[i] = (:service, RAI_CLOCK[] + ps_)
+                println("  [practice] AI ", i, " in its stall (s ", round(Int, sg), ") for ", round(Int, ps_), " s"); flush(stdout)
+            else
+                RAI_REPAIR[i] = (:service, RAI_CLOCK[] + RAI_SERVICE_S)
+                println("  [repair] AI ", i, " stopped at its box (s ", round(Int, sg), "): service ", RAI_SERVICE_S, " s"); flush(stdout)
+            end
         end
     end
     (thr, brk, st)
+end
+"PITSTALL-2: JM_AI_STALLSTART (default on), read when a practice starts -- never at load (A/B without a rebuild)."
+rai_stallstart_on() = get(ENV, "JM_AI_STALLSTART", "1") != "0"
+"""PITSTALL-2 (PO 2026-11-07: "each car, AI or player, starts a practice session in its own pit stall ... as in Classic"): a practice
+session's Racecraft field starts at rest in its own stalls (rai_stall), facing the pit exit, each held as a repair stop's :stall
+-- the pit-lane states (rai_inpit: no snap-back, no retirement, not counted for the blue flag). Car i leaves JM_AI_STALLT0 +
+(i - 1) x JM_AI_STALLGAP s after the start (3 s, 6 s): the car nearest the exit first, so none drives past a parked one; then it
+is a repair's :pitout -- Classic's pit line at pit speed until the line meets the race line, then the race. A car without a stall
+(no pit frame, no stalls listed, more cars than stalls) keeps its grid slot. Returns the number parked."""
+function rai_stall_start!(AICARS, AIPHYS, AILINE, groundz)
+    T = RAI_PITT[]
+    (rai_stallstart_on() && MODE == "practice" && AI_PHYSICS && PITSTALL_ON && T !== nothing && !isempty(PIT_STALLS) && AILINE !== nothing) || return 0
+    gap = max(something(tryparse(Float64, get(ENV, "JM_AI_STALLGAP", "6")), 6.0), 0.0)
+    t0 = max(something(tryparse(Float64, get(ENV, "JM_AI_STALLT0", "3")), 3.0), 0.0)
+    nref = length(T.ref.lx); n = 0
+
+    ref0 = something(stall_at(0), (0.0, 0.0))[1]; idx = collect(1:min(length(AIPHYS), length(AICARS)))
+    sort!(idx; by = i -> (st = rai_stall(i); st === nothing ? Inf : -mod(st[1] - ref0 + T.lap/2, T.lap)))
+
+    rel_ = sort([practice_rand("JM_PRACTICE_OUT", "5,150") for _ in idx])
+    for k in 2:length(rel_); rel_[k] = max(rel_[k], rel_[k - 1] + gap); end
+    for i in idx
+        stl = rai_stall(i)
+        stl === nothing && (println("  [pitstall] AI ", i, ": no stall (", length(PIT_STALLS), " listed) -- its grid slot"); continue)
+        w = CLASSICAI.tworld(T, stl[1], stl[2])
+        a = CLASSICAI.tworld(T, stl[1] - 1.0, stl[2]); b = CLASSICAI.tworld(T, stl[1] + 1.0, stl[2])
+        θ = atan(b[2] - a[2], b[1] - a[1])
+        gh = groundz(w[1], w[2]; hold = false)
+        DriveRT3D.reseat3d!(AIPHYS[i], w[1], w[2], θ; v = 0.0, h = gh > -900 ? Float64(gh) : NaN)
+        (s, lat) = RaceAI.project(AILINE, w[1], w[2])
+        AICARS[i].s = s; AICARS[i].lane = lat; AICARS[i].tlane = lat; AICARS[i].v = 0.0; AICARS[i].lap = 0
+        length(RAI_TLS) < i && append!(RAI_TLS, fill(NaN, i - length(RAI_TLS)))
+        RAI_TLS[i] = NaN
+
+        (sg, _, h) = CLASSICAI.tlocate(T, w[1], w[2], mod(round(Int, stl[1]*CLASSICAI._k(T)), nref) + 1); RAI_PITH[i] = h
+        RAI_REPAIR[i] = (:stall, RAI_CLOCK[] + (practice_runs_on() ? rel_[n + 1] : t0 + gap*n)); n += 1
+        println("  [pitstall] AI ", i, " in stall_", rai_stall_k(i), " (Classic ", stl[1], " m, lateral ", stl[2], "; located at ", round(sg, digits = 1),
+                "; Classic's pit line here ", round(rai_pit_dlat(T.lines[CLASSICAI.PIT], stl[1]), digits = 1), ", driven ", round(rai_pit_clear_dlat(T.lines[CLASSICAI.PIT], stl[1]), digits = 1),
+                ") -- race line s ", round(s, digits = 1), " lat ", round(lat, digits = 1), ", heading ", round(rad2deg(atan(sin(θ - w[3]), cos(θ - w[3]))), digits = 1),
+                " deg off the frame's; leaves at t ", round(RAI_REPAIR[i][2], digits = 1))
+    end
+    n > 0 && (println("  [pitstall] practice: ", n, " AI parked in their stalls (every ", PITSTALL_STEP[], " stall; JM_AI_STALLSTART=0: the grid)"); flush(stdout))
+    n
+end
+
+const CLASSIC_STALL = Dict{Int,Tuple{Symbol,Int,Float64}}()
+"""PITSTALL-2 S3: park the line-following field `f` in its stalls (practice); the number parked."""
+function classicai_stall_start!(f, T, AICARS)
+    empty!(CLASSIC_STALL)
+    (rai_stallstart_on() && MODE == "practice" && PITSTALL_ON && T !== nothing && PIT_STALL_T[] === T && haskey(T.lines, CLASSICAI.PIT) &&
+     !isempty(PIT_STALLS) && isempty(REPLAY_FILE_R[]) && !haskey(ENV, "JM_AIPLACE")) || return 0
+    gap = max(something(tryparse(Float64, get(ENV, "JM_AI_STALLGAP", "6")), 6.0), 0.0)
+    t0 = max(something(tryparse(Float64, get(ENV, "JM_AI_STALLT0", "3")), 3.0), 0.0)
+    L = T.lines[CLASSICAI.PIT]; n = 0
+    ref0 = something(stall_at(0), (0.0, 0.0))[1]; idx = collect(1:min(length(f.cars), length(AICARS)))
+    sort!(idx; by = i -> (st = rai_stall(i); st === nothing ? Inf : -mod(st[1] - ref0 + T.lap/2, T.lap)))
+    for i in idx
+        stl = rai_stall(i)
+        stl === nothing && (println("  [pitstall] AI ", i, ": no stall (", length(PIT_STALLS), " listed) -- its grid slot"); continue)
+        c = f.cars[i]; s = mod(stl[1], T.lap)
+        c.s = s; c.d = stl[2]; c.v = 0.0; c.dv = 0.0; c.da = 0.0; c.along = 0.0; c.atire = 0.0
+        c.line = CLASSICAI.PIT; c.fromline = CLASSICAI.PIT; c.offset = stl[2] - CLASSICAI.dlat(L, s); c.mode = 0; c.w = 1.0
+        c.hold = typemax(Int) ÷ 4; c.react = 0; c.hint = 0
+        (x, z, th) = CLASSICAI.tworld(T, s, c.d); c.yaw = th; c.yawr = 0.0; c.yroad = T.height(s, c.d, x, z); c.yroadv = 0.0
+        c.pose = CLASSICAI._pose(T, c); c.prev = c.pose
+        CLASSIC_STALL[i] = (:stall, CLASSICAI.TICKN[] + round(Int, (t0 + gap*n)/CLASSICAI.TICK), c.pace); c.pace = 0.0
+        println("  [pitstall] AI ", i, " in stall_", rai_stall_k(i), " (Classic ", stl[1], " m, lateral ", stl[2], "; Classic's pit line here ",
+                round(CLASSICAI.dlat(L, s), digits = 1), ", driven ", round(rai_pit_clear_dlat(L, s), digits = 1), ") -- line-following; leaves at t ",
+                round(t0 + gap*n, digits = 1), " from now")
+        n += 1
+    end
+    n > 0 && (println("  [pitstall] practice: ", n, " AI parked in their stalls (every ", PITSTALL_STEP[], " stall; line-following field; JM_AI_STALLSTART=0: the grid)"); flush(stdout))
+    n
+end
+
+const CLASSIC_MRATE = Float64[]; const CLASSIC_MNEXT = Float64[]; const CLASSIC_MEDGE = Ref(Inf)
+const CLASSIC_MSLIDE = Dict{Int,Tuple{Float64,Float64}}()
+const CLASSIC_MIST = Dict{Int,NTuple{7,Any}}()
+function classicai_mistake_step!(f, T)
+    (RAI_MISTAKE_RATE > 0 && T !== nothing && !AI_PHYSICS) || return nothing
+    n = length(f.cars)
+    if length(CLASSIC_MRATE) != n
+        empty!(CLASSIC_MRATE); empty!(CLASSIC_MNEXT); empty!(CLASSIC_MIST)
+        for i in 1:n
+            s = driver_skill(AISPECS[mod1(i, length(AISPECS))][6])
+            fct = s === nothing ? 1.0 : max(0.4 + 2.5*(1.03 - 0.5*(s.exper + s.alert))/0.07, 0.2)*max(1.0 + 3.0*(s.aggr - 1.0), 0.5)
+            push!(CLASSIC_MRATE, RAI_MISTAKE_RATE*fct); push!(CLASSIC_MNEXT, CLASSICAI.TICKN[]*CLASSICAI.TICK + 60.0)
+        end
+        println("  [aiskill] line-following mistakes per minute: ", join(["$(AISPECS[mod1(i, length(AISPECS))][6]) $(round(CLASSIC_MRATE[i], digits = 3))" for i in 1:n], ", ")); flush(stdout)
+    end
+    t = CLASSICAI.TICKN[]*CLASSICAI.TICK; Lr = T.lines[CLASSICAI.RACE]
+    for (i, c) in enumerate(f.cars)
+        busy = haskey(CLASSIC_STALL, i) || haskey(AI_COOL, i) || (c.id in CLASSICAI.GONE)
+        if t >= CLASSIC_MNEXT[i]
+            CLASSIC_MNEXT[i] = t + 60.0
+            (!busy && !haskey(CLASSIC_MIST, i) && rand(AI_RNG[]) < 1.0 - exp(-CLASSIC_MRATE[i])) && (CLASSIC_MIST[i] = (:armed, 0.5 + rand(AI_RNG[]), c.pace, Inf, Inf, t, 0.0))
+        end
+        sl = get(CLASSIC_MSLIDE, i, nothing)
+        if sl !== nothing
+            lo_, hi_ = CLASSICAI.corridor(T, c.s); dev_ = max(sl[2], abs(c.d - CLASSICAI.dlat(Lr, c.s)))
+            CLASSIC_MSLIDE[i] = (sl[1], dev_)
+            if t - sl[1] > 3.0
+                delete!(CLASSIC_MSLIDE, i)
+                println("  [mistake] AI ", i, " slid ", round(dev_, digits = 1), " m wide of the race line"); flush(stdout)
+            end
+        end
+        m = get(CLASSIC_MIST, i, nothing); m === nothing && continue
+        busy && (m[1] === :active && (c.pace = m[3]); delete!(CLASSIC_MIST, i); continue)
+        v0 = CLASSICAI.lspeed(Lr, c.s)
+        if m[1] === :armed
+            va = minimum(CLASSICAI.lspeed(Lr, c.s + d) for d in 20.0:20.0:80.0)
+            if va < 0.85*v0
+                CLASSIC_MIST[i] = (:active, m[2], c.pace, v0, v0, t, 0.0); c.pace = c.pace*(1.0 + 0.12*m[2])
+                println("  [mistake] AI ", i, " (", AISPECS[mod1(i, length(AISPECS))][6], ") brakes too late at s ", round(Int, c.s),
+                        " (severity ", round(m[2], digits = 2), ") at t ", round(t, digits = 1)); flush(stdout)
+            end
+        else
+            lo, hi = CLASSICAI.corridor(T, c.s); edge = min(c.d - lo, hi - c.d)
+            dev = max(m[7], abs(c.d - CLASSICAI.dlat(Lr, c.s)))
+            vmin = min(m[5], v0); CLASSIC_MIST[i] = (:active, m[2], m[3], m[4], vmin, m[6], dev)
+            edge < CLASSIC_MEDGE[] && (CLASSIC_MEDGE[] = edge)
+
+            if (vmin < 0.9*m[4] && v0 > 1.05*vmin) || t - m[6] > 10.0
+
+                k = CLASSICAI.tcurv(T, c.s); out = k > 0 ? -1.0 : 1.0
+                t - m[6] <= 10.0 && (c.dv += out*(2.0 + 2.0*m[2]))
+                c.pace = m[3]; delete!(CLASSIC_MIST, i)
+                CLASSIC_MSLIDE[i] = (t, 0.0)
+                println("  [mistake] AI ", i, " over at s ", round(Int, c.s), ": ", round(dev, digits = 1), " m off the race line at most, ",
+                        round(CLASSIC_MEDGE[], digits = 1), " m inside the corridor's edge at the closest"); flush(stdout); CLASSIC_MEDGE[] = Inf
+            end
+        end
+    end
+    nothing
+end
+"""PITSTALL-2 S3: each frame, the parked line-following cars: held, released in turn, out along the pit line, back on the race lines."""
+function classicai_stall_step!(f, T)
+    isempty(CLASSIC_STALL) && return nothing
+    L = T.lines[CLASSICAI.PIT]
+    for (i, st) in CLASSIC_STALL
+        i > length(f.cars) && continue
+        c = f.cars[i]; c.hold = typemax(Int) ÷ 4
+        if st[1] === :stall
+            c.pace = 0.0; c.v = 0.0
+            if CLASSICAI.TICKN[] >= st[2]
+                c.fromline = CLASSICAI.PIT; c.d0 = c.d; c.dv0 = 0.0; c.offset = rai_pit_clear_dlat(L, c.s) - CLASSICAI.dlat(L, c.s)
+                F = T.P.basic; c.mode = 1; c.dw = 1/max(F.T, 1.0); c.w = c.dw; c.pace = st[3]
+                CLASSIC_STALL[i] = (:out, st[2], st[3])
+                println("  [pitstall] AI ", i, " leaves its stall (stall_", rai_stall_k(i), ", s ", round(Int, c.s), ")"); flush(stdout)
+            end
+            continue
+        end
+        inlane = PIT_BOX[] - 20.0 <= c.s <= PIT_END[] + 30.0
+        if inlane
+            c.offset = rai_pit_clear_dlat(L, c.s) - CLASSICAI.dlat(L, c.s)
+        else
+            c.offset = 0.0
+            if abs(CLASSICAI.dlat(L, c.s) - CLASSICAI.dlat(T.lines[CLASSICAI.RACE], c.s)) < 2.0 || CLASSICAI.TICKN[] - st[2] > round(Int, 90.0/CLASSICAI.TICK)
+                CLASSICAI.join!(T, c, c.d; why = :pitout); c.hold = 0; delete!(CLASSIC_STALL, i)
+                println("  [pitstall] AI ", i, " back in the race at s ", round(Int, c.s)); flush(stdout)
+            end
+        end
+    end
+    nothing
 end
 """TD261103-4: a finished Racecraft car's driving after the flag. :cool -- the controller's (at RAI_COOL_PACE) until Classic's pit
 entry, where it takes the next box along the pit lane; :pit -- along Classic's pit line (pure pursuit on its world points) at
@@ -3286,7 +3712,10 @@ function rai_cool_drive!(i, pc, rc, thr, brk, st)
             else
                 box = PIT_BOX[] + 30.0 - 15.0*nb
             end
-            RAI_COOL[i] = (:pit, box); println("  [cooldown] AI ", i, " into the pits, box at ", round(Int, box), " m")
+
+            rai_stall(nb + 1) === nothing || (box = rai_stall(nb + 1)[1]; RAI_STALL_OF[i] = nb + 1)
+            RAI_COOL[i] = (:pit, box); println("  [cooldown] AI ", i, " into the pits, box at ", round(Int, box), " m",
+                                               haskey(RAI_STALL_OF, i) ? string(" (stall_", rai_stall_k(RAI_STALL_OF[i]), ")") : "")
         end
         return (thr, brk, st)
     elseif rc[1] === :stop
@@ -3296,7 +3725,7 @@ function rai_cool_drive!(i, pc, rc, thr, brk, st)
     end
     L = T.lines[CLASSICAI.PIT]; sg = rai_pit_s(T, i, pc)
     la = clamp(5.0 + 0.4*pc.v, 5.0, 18.0)
-    w = CLASSICAI.tworld(T, sg + la, rai_pit_dlat(L, sg + la))
+    w = CLASSICAI.tworld(T, sg + la, rai_pit_target_dlat(L, sg + la, get(RAI_STALL_OF, i, i), mod(rc[2] - sg + T.lap/2, T.lap) - T.lap/2 - la))
     herr = atan(sin(atan(w[2] - pc.z, w[1] - pc.x) - pc.θ), cos(atan(w[2] - pc.z, w[1] - pc.x) - pc.θ))
     κ = 2.0*sin(herr)/max(hypot(w[1] - pc.x, w[2] - pc.z), 1.0)
     st = clamp((atan(2.41κ) + 0.06*(pc.v*κ - AIyaw(pc)))/0.30, -1.0, 1.0)
@@ -3340,6 +3769,16 @@ function rai_hist_dump(i, AILINE)
 end
 
 const RAI_SPINREC_CMD = Ref((0.0, 0.0, 0.0))
+const RAI_SPIN_CLEAR = 150.0
+"""The gap (m along the line) from car `i` back to the nearest racing AI car behind it (Inf if none)."""
+function rai_gap_behind(i, AICARS, AIPHYS, AILINE)
+    L = AILINE.total; si = mod(AICARS[i].s, L); g = Inf
+    for k in eachindex(AIPHYS)
+        (k == i || k in RAI_GONE || k > length(AICARS) || haskey(RAI_OUT, k) || rai_inpit(k)) && continue
+        g = min(g, mod(si - mod(AICARS[k].s, L), L))
+    end
+    g
+end
 """AI-NOSNAP-1 S7: the spun-car manoeuvre (see RAI_SPINREC). True while car `i` is in it; its (thr, brk, st) in RAI_SPINREC_CMD."""
 function rai_spin_recover!(i, pc, AICARS, AILINE)
     s = AICARS[i].s
@@ -3395,10 +3834,13 @@ function aiphys_poses!(cs, ddt, ai_hit, AICARS, AILINE, AIPHYS, ai_onroad, ai_st
         i in RAI_GONE && continue
 
         if !RAI_SPIN_DONE[] && RAI_SPIN_AT[2] > 0 && RAI_CLOCK[] >= RAI_SPIN_AT[1] && !haskey(RAI_OUT, i) &&
-           (i == RAI_SPIN_AT[2] || haskey(RAI_OUT, RAI_SPIN_AT[2]) || RAI_SPIN_AT[2] in RAI_GONE)
+           (i == RAI_SPIN_AT[2] || haskey(RAI_OUT, RAI_SPIN_AT[2]) || RAI_SPIN_AT[2] in RAI_GONE ||
+            (RAI_CLOCK[] >= RAI_SPIN_AT[1] + 30.0 && !rai_inpit(i))) &&
+           (gb = rai_gap_behind(i, AICARS, AIPHYS, AILINE)) > RAI_SPIN_CLEAR
             RAI_SPIN_DONE[] = true
             g_ = groundz_ai(pc.x, pc.z); DriveRT3D.reseat3d!(pc, pc.x, pc.z, pc.θ + π; v = 5.0, h = g_ > -900 ? Float64(g_) : NaN)
-            println("  [airec] AI ", i, " turned round by JM_RAI_SPIN_AT at t ", round(RAI_CLOCK[], digits = 1)); flush(stdout)
+            println("  [airec] AI ", i, " turned round by JM_RAI_SPIN_AT at t ", round(RAI_CLOCK[], digits = 1), " (the next car ",
+                    isfinite(gb) ? string(round(Int, gb), " m behind)") : "behind: none)"); flush(stdout)
         end
 
         if RAI_DMG_AT[2] == i && RAI_CLOCK[] >= RAI_DMG_AT[1] && !RAI_DMG_DONE[]
@@ -3412,6 +3854,14 @@ function aiphys_poses!(cs, ddt, ai_hit, AICARS, AILINE, AIPHYS, ai_onroad, ai_st
         AICARS[i].s = s; AICARS[i].lane = lat; AICARS[i].v = pc.v
         if prevs > AILINE.total*0.7 && s < AILINE.total*0.3
             AICARS[i].lap += 1
+
+            if !IS_RACE && haskey(RAI_PRUN, i) && !haskey(RAI_REPAIR, i) && !haskey(RAI_OUT, i)
+                RAI_PRUN[i] -= 1
+                if RAI_PRUN[i] <= 0 && RAI_PITT[] !== nothing && isfinite(PIT_IN[])
+                    delete!(RAI_PRUN, i); push!(RAI_PSTOP, i); RAI_REPAIR[i] = (:ppit, RAI_CLOCK[])
+                    println("  [practice] AI ", i, " on its in-lap (t ", round(RAI_CLOCK[], digits = 1), ")"); flush(stdout)
+                end
+            end
 
             if RAI_PIT_ON && IS_RACE && (cs.laps >= RACE_LAPS_R[] || any(a -> a.lap >= RACE_LAPS_R[], AICARS))
                 rc = get(RAI_COOL, i, nothing)
@@ -3493,7 +3943,7 @@ function aiphys_poses!(cs, ddt, ai_hit, AICARS, AILINE, AIPHYS, ai_onroad, ai_st
 
                 vre = max(8.0, pc.v*0.6)
                 if RAI_RESEAT_PACE > 0 && RAI_PROF[] !== nothing
-                    (fs_, fv_) = RAI_PROF[]; k_ = clamp(floor(Int, mod(s + 10.0, AILINE.total)/fs_[2]) + 1, 1, length(fv_))
+                    (fs_, fv_) = rai_prof(i, false); k_ = clamp(floor(Int, mod(s + 10.0, AILINE.total)/fs_[2]) + 1, 1, length(fv_))
                     vre = max(vre, RAI_RESEAT_PACE*fv_[k_])
                 end
                 RAI_RESEAT ? DriveRT3D.reseat3d!(pc, rp[1], rp[3], rp[4]; v = vre, h = (g_ = groundz_ai(rp[1], rp[3]); g_ > -900 ? Float64(g_) : NaN)) :
@@ -3531,9 +3981,9 @@ function aiphys_poses!(cs, ddt, ai_hit, AICARS, AILINE, AIPHYS, ai_onroad, ai_st
     vts = RaceAI.plan!(AICARS, AILINE; scale = 1.0, amax = AI_AMAX, dt = ddt,
                        player = (ppr[1], ppr[2], cs.v), hold = !RAI_FOLLOW, lanes = !RAI_PASS)
 
-    if RAI_PROF_ON && RAI_PROF[] === nothing
-        RAI_PROF[] = rai_profile(AILINE, RAI_AMAX_PLAN, RAI_BRAKE_PLAN)
-        RAI_PROF_LATE[] = rai_profile(AILINE, RAI_AMAX_PLAN, RAI_BRAKE_PLAN*RAI_LATE)
+    if RAI_PROF_ON && !RAI_PROF_SAID[]
+        RAI_PROF_SAID[] = true
+        RAI_PROF[] === nothing && rai_prof_build!(AILINE)
         println("  [aiphys] speed profile at ", RAI_AMAX_PLAN, " m/s2 cornering: ", length(RAI_PROF[][1]), " stations, min ",
                 round(Int, 3.6*minimum(RAI_PROF[][2])), " max ", round(Int, 3.6*maximum(RAI_PROF[][2])), " km/h"); flush(stdout)
         if get(ENV, "JM_RAI_PROFDIAG", "0") != "0"
@@ -3547,6 +3997,21 @@ function aiphys_poses!(cs, ddt, ai_hit, AICARS, AILINE, AIPHYS, ai_onroad, ai_st
                 c_ = RaceAI.pose_at(AILINE, x, 0.0); r_ = RaceAI.pose_at(AILINE, x, RaceAI.racelane(AILINE, x))
                 println("  [raiprof]   s ", x, " centre (", round(c_[1], digits = 2), ", ", round(c_[3], digits = 2), ") hd ", round(c_[4], digits = 3),
                         "  line (", round(r_[1], digits = 2), ", ", round(r_[3], digits = 2), ") lane ", round(RaceAI.racelane(AILINE, x), digits = 2))
+            end
+
+            let n1 = floor(Int, AILINE.total), P1 = [(q = RaceAI.pose_at(AILINE, x - 1.0, RaceAI.racelane(AILINE, x - 1.0)); (q[1], q[3])) for x in 1.0:1.0:n1],
+                pk(k) = P1[mod1(k, n1)], hd1(k) = (u = pk(k + 1); v = pk(k - 1); atan(u[2] - v[2], u[1] - v[1])), sp = Tuple{Float64,Int}[]
+                for k in 1:n1
+                    a = pk(k - 2); b = pk(k); c = pk(k + 2)
+                    cr = (b[1] - a[1])*(c[2] - b[2]) - (b[2] - a[2])*(c[1] - b[1])
+                    d = hypot(b[1] - a[1], b[2] - a[2])*hypot(c[1] - b[1], c[2] - b[2])*hypot(c[1] - a[1], c[2] - a[2])
+                    κ1 = d > 1e-9 ? abs(2cr/d) : 0.0; dh = hd1(k + 14) - hd1(k - 14); dh = atan(sin(dh), cos(dh))
+                    κ1 > 0.05 && abs(dh) < deg2rad(10) && push!(sp, (κ1, k - 1))
+                end
+                sort!(sp, rev = true); top = Tuple{Float64,Int}[]
+                for e in sp; all(t -> min(abs(t[2] - e[2]), n1 - abs(t[2] - e[2])) > 20, top) && push!(top, e); length(top) >= 8 && break; end
+                println("  [raipath] steered-path spikes (> 0.05 /m, no corner): ", length(sp), " m; worst ",
+                        isempty(top) ? "none" : join(("s $(s) $(round(k, digits = 3))" for (k, s) in top), ", "))
             end
             pr_ = parse.(Float64, split(get(ENV, "JM_RAI_PROFDIAG_AT", "3900:4060"), ":"))
             for xx in pr_[1]:5.0:(pr_[2] < pr_[1] ? pr_[2] + AILINE.total : pr_[2])
@@ -3573,10 +4038,13 @@ function aiphys_poses!(cs, ddt, ai_hit, AICARS, AILINE, AIPHYS, ai_onroad, ai_st
             late = RAI_LATE > 1.0 && i <= length(RAI_PS) && RAI_PS[i].side != 0 && RAI_PS[i].passee >= 1 &&
                    -2RAI_CAR_L < mod(AICARS[RAI_PS[i].passee].s - AICARS[i].s + AILINE.total/2, AILINE.total) - AILINE.total/2 < 2RAI_CAR_L + (RAI_ENTRY ? RAI_ENTRY_GAP : 0.0) &&
                    (!RAI_ENTRY || abs(AICARS[RAI_PS[i].passee].lane - AICARS[i].lane) > RAI_CAR_W)
-            (fs, fv) = late ? RAI_PROF_LATE[] : RAI_PROF[]; k = clamp(floor(Int, mod(AICARS[i].s + 5.0, AILINE.total)/fs[2]) + 1, 1, length(fv))
-            vp = fv[k]*(i <= length(RAI_TALENT) ? RAI_TALENT[i] : 1.0)*rai_limiter!(i, AICARS[i].lap)
+            (mk, ml) = rai_mistake!(i, AICARS[i].s, AIPHYS[i].v, !haskey(RAI_REC, i) && !rai_inpit(i) && !haskey(RAI_OUT, i))
+            (fs, fv) = rai_prof(i, late || ml); k = clamp(floor(Int, mod(AICARS[i].s + 5.0, AILINE.total)/fs[2]) + 1, 1, length(fv))
+            RAI_APEXDIAG && rai_apex_diag!(i, AICARS[i].s, AIPHYS[i].v)
+            vp = fv[k]*(ml ? 1.0 : (i <= length(RAI_TALENT) ? RAI_TALENT[i] : 1.0)*rai_limiter!(i, AICARS[i].lap))*mk
 
-            vts[i] = (late && RAI_ENTRY) ? vp : min(vts[i], vp)
+            AI_SKILL_PLAN && i <= length(RAI_TALENT) && (vts[i] *= RAI_TALENT[i])
+            vts[i] = (ml || (late && RAI_ENTRY)) ? vp : min(vts[i], vp)
             _tv_prof = vp
         end
         _tv_pre = vts[i]
@@ -3630,11 +4098,17 @@ function aiphys_poses!(cs, ddt, ai_hit, AICARS, AILINE, AIPHYS, ai_onroad, ai_st
         if RAI_LANE_RATE > 0
             length(RAI_TLS) < i && append!(RAI_TLS, fill(NaN, i - length(RAI_TLS)))
             tl0 = RAI_TLS[i]; tlw = AICARS[i].tlane
-            RAI_TLS[i] = isnan(tl0) ? tlw : tl0 + clamp(tlw - tl0, -RAI_LANE_RATE*ddt, RAI_LANE_RATE*ddt)
+
+            lr_ = RAI_LANE_V0 > 0 ? RAI_LANE_RATE*clamp(RAI_LANE_V0/max(pc.v, 1.0), 0.5, 1.0) : RAI_LANE_RATE
+            RAI_TLS[i] = isnan(tl0) ? tlw : tl0 + clamp(tlw - tl0, -lr_*ddt, lr_*ddt)
         end
         thr, brk, st = RaceAI.controller(AILINE, AICARS[i].s, AICARS[i].lane, RAI_LANE_RATE > 0 ? RAI_TLS[i] : AICARS[i].tlane, vts[i],
                                          pc.x, pc.z, pc.θ, pc.v, AIyaw(pc); power = rai_power(pc.v, i), pp = RAI_PP, amax = RAI_AMAX_STEER, lo = wlo, hi = whi,
-                                         la_max = _obsla, holdwall = _obsheld || (RAI_YIELD && any(ps -> ps.side != 0 && ps.passee == i, RAI_PS)))
+                                         la_max = _obsla, holdwall = _obsheld || (RAI_YIELD && any(ps -> ps.side != 0 && ps.passee == i, RAI_PS)),
+                                         vlat = (RAI_VLAT > 0 && !haskey(RAI_REC, i) && !rai_inpit(i)) ? RAI_VLAT : Inf,
+                                         pathk = RAI_PATHK)
+        RAI_LATDIAG && rai_lat_diag!(i, AICARS[i].lane, pc.v)
+        RAI_SDIAG[1] < RAI_SDIAG[2] && rai_s_diag!(i, AICARS[i].s, AICARS[i].lane, RAI_LANE_RATE > 0 ? RAI_TLS[i] : AICARS[i].tlane, wlo, whi, pc.v, vts[i], thr, brk, st)
 
         if RAI_WIDE_BRK >= 0 && i <= length(RAI_LATV) && rc_ === nothing && pc.v > 15.0
             ln_ = AICARS[i].lane; lpred = ln_ + RAI_LATV[i]*RAI_OBS_T; edge = RaceAI.LANE_MAX + 1.5
@@ -3874,18 +4348,116 @@ function track_position_step!(cs, dt, rst, race_go, player_prog, player_s_prev, 
     return (player_prog, player_s_prev, ffb_jolt)
 end
 
+const NET_LINEPRED = get(ENV, "JM_NET_LINEPRED", "0") != "0"
+const NET_DRAWN = Dict{UInt8,NTuple{3,Float64}}(); const NET_POPS = Float64[]
+const NET_SMOOTH = get(ENV, "JM_NET_SMOOTH", "1") != "0"
+const NET_OMEGA = parse(Float64, get(ENV, "JM_NET_OMEGA", "8.0"))
+const NETPRED_S = Dict{UInt8,Float64}()
+const NETPRED_E = Dict{UInt8,NTuple{4,Float64}}()
+const NETPRED_Q = Dict{UInt8,Tuple{Any,Float64}}()
+const NETPRED_T = Ref(time())
+dt_frame_net() = (t = time(); d = clamp(t - NETPRED_T[], 0.0, 0.1); NETPRED_T[] = t; d)
+
+const NET_TURNPRED = get(ENV, "JM_NET_TURNPRED", "1") != "0"
+const NET_TURNMODE = Symbol(get(ENV, "JM_NET_TURNMODE", "course"))
+const NET_ERRSV = Dict(:yawa => Float64[], :yaw => Float64[], :course => Float64[])
+const NETHIST = Dict{UInt8,Vector{NTuple{5,Float64}}}()
+function net_hist!(id, q)
+    h = get!(() -> NTuple{5,Float64}[], NETHIST, id)
+    (isempty(h) || h[end][1] != q.tick) && (push!(h, (Float64(q.tick), Float64(q.yaw), Float64(q.v), Float64(q.x), Float64(q.z))); length(h) > 4 && popfirst!(h))
+    nothing
+end
+"""(yaw rate, acceleration) at packet `q` from the packet before it in `id`'s history; (0, 0) with none or after a gap."""
+function net_rates(id, q)
+    h = get(NETHIST, id, nothing); h === nothing && return (0.0, 0.0)
+    k = findlast(e -> e[1] == q.tick, h); (k === nothing || k == 1) && return (0.0, 0.0)
+    dt = (h[k][1] - h[k-1][1]) / 1000
+    (0 < dt < 0.5) || return (0.0, 0.0)
+    (clamp(RaceAI.wrapπ(h[k][2] - h[k-1][2]) / dt, -2.0, 2.0), clamp((h[k][3] - h[k-1][3]) / dt, -15.0, 15.0))
+end
+"""(course at `q`, its rate) from the chords of the last three packets -- the path's own turn, not the car's yaw (a sliding car
+points off its path); nothing without three packets."""
+function net_course(id, q)
+    h = get(NETHIST, id, nothing); h === nothing && return nothing
+    k = findlast(e -> e[1] == q.tick, h); (k === nothing || k < 3) && return nothing
+    d1 = (h[k-1][1] - h[k-2][1]) / 1000; d2 = (h[k][1] - h[k-1][1]) / 1000
+    (0 < d1 < 0.5 && 0 < d2 < 0.5) || return nothing
+    c1 = atan(h[k-1][5] - h[k-2][5], h[k-1][4] - h[k-2][4]); c2 = atan(h[k][5] - h[k-1][5], h[k][4] - h[k-1][4])
+    (hypot(h[k][5] - h[k-1][5], h[k][4] - h[k-1][4]) < 0.3) && return nothing
+    ω = clamp(RaceAI.wrapπ(c2 - c1) / ((d1 + d2)/2), -2.0, 2.0)
+    (c2 + ω*d2/2, ω)
+end
+"""Packet `q` advanced `age` s (capped at `cap`) on an arc at its yaw rate, its speed changing at its acceleration.
+`mode` (MP-6 S3 A/B): :yawa (yaw rate + acceleration), :yaw (yaw rate only), :course (the path's course and turn from positions)."""
+function net_turn_predict(q, age, id; cap = NetPlay.EXTRAP_MAX, mode = NET_TURNMODE)
+    age = clamp(age, 0.0, cap)
+    (ω, a) = net_rates(id, q); mode === :yawa || (a = 0.0)
+    x = Float64(q.x); z = Float64(q.z); ψ = Float64(q.yaw); v = Float64(q.v); h = age/4
+    if mode === :course
+        c = net_course(id, q); c === nothing ? (ω = 0.0) : ((ψ, ω) = c)
+    end
+    ψ0 = ψ
+    for _ in 1:4
+        vm = max(v + 0.5a*h, 0.0); ψm = ψ + 0.5ω*h
+        x += vm*cos(ψm)*h; z += vm*sin(ψm)*h
+        v = max(v + a*h, 0.0); ψ += ω*h
+    end
+
+    (; x = x, y = q.y, z = z, yaw = Float64(q.yaw) + (ψ - ψ0), v = v, steer = q.steer, tick = q.tick, car = get(q, :car, 0xff))
+end
+"""Packet `q` advanced `age` s: along the centreline at its lateral, or (off the road / against the line) straight on, capped."""
+function net_line_predict(q, age, id, line)
+    (NET_TURNPRED && !NET_LINEPRED) && return net_turn_predict(q, age, id)
+    (NET_LINEPRED && line !== nothing) || return NetPlay.predict(q, min(age, NetPlay.EXTRAP_MAX))
+    age = clamp(age, 0.0, NetPlay.STALE_S)
+    (s, lat) = RaceAI.project(line, q.x, q.z; hint = get(NETPRED_S, id, nothing)); NETPRED_S[id] = s
+    hd = RaceAI.pose_at(line, s, 0.0)[4]
+    (abs(lat) > 9.0 || cos(q.yaw - hd) < 0.5) && return NetPlay.predict(q, min(age, NetPlay.EXTRAP_MAX))
+
+    dψ = RaceAI.wrapπ(q.yaw - hd)
+    p = RaceAI.pose_at(line, s + q.v*cos(dψ)*age, lat + q.v*sin(dψ)*age)
+    (; x = p[1], y = q.y, z = p[3], yaw = q.yaw + RaceAI.wrapπ(p[4] - hd), v = q.v, steer = q.steer, tick = q.tick, car = get(q, :car, 0xff))
+end
+"""The pose to draw for remote car `id` now: the line prediction plus its decaying correction offset (continuous across packets)."""
+function net_render_pose(id, q, line, dt)
+    now = time(); arr = get(NETLINK.rxtime, id, now)
+    net_hist!(id, q)
+    T = net_line_predict(q, now - arr, id, line)
+    e = get(NETPRED_E, id, (0.0, 0.0, 0.0, 0.0)); old = get(NETPRED_Q, id, nothing)
+    if old !== nothing && old[1].tick != q.tick
+        Tb = net_line_predict(old[1], now - old[2], id, line)
+        e = (e[1] + Tb.x - T.x, e[2] + Tb.z - T.z, e[3], e[4])
+        hypot(e[1], e[2]) > 5.0 && (e = (0.0, 0.0, 0.0, 0.0))
+    end
+    NETPRED_Q[id] = (q, arr)
+    w = NET_OMEGA; ax = -w^2*e[1] - 2w*e[3]; az = -w^2*e[2] - 2w*e[4]
+    vx = e[3] + ax*dt; vz = e[4] + az*dt
+    e = (e[1] + vx*dt, e[2] + vz*dt, vx, vz); NETPRED_E[id] = e
+    (; x = T.x + e[1], y = T.y, z = T.z + e[2], yaw = T.yaw, v = T.v, steer = T.steer, tick = T.tick, car = T.car)
+end
+
 function netlink_step!(cs, inp, frames, ai_poses, AICARS, CLINE, aibankK, ai_ground, net_last)
 
     yield()
     NetPlay.poll!(NETLINK)
 
+    if NETMODE == "host"
+        for id in keys(NETLINK.remote)
+            if id < NetPlay.AI_ID0 && Int(id) > HUMAN_STALLS[]
+                HUMAN_STALLS[] = Int(id)
+                println("  [pitstall] human car ", Int(id), " has stall_", Int(id) - 1, "; the AI field's stalls now start at stall_", rai_stall_k(1)); flush(stdout)
+            end
+        end
+    end
+
     if NETMODE == "join" && !NET_SWITCHED[] && haskey(NETLINK.remote, 0x01)
         NET_SWITCHED[] = true
         net_free_car()
     end
-    if cs.t - net_last[] >= 1/NET_HZ
-        net_last[] = cs.t
-        NetPlay.send_pose!(NETLINK, NET_ID, round(Int, cs.t*1000),
+
+    if cs.t - net_last[] >= 1/NET_HZ - 1e-6
+        net_last[] = cs.t - net_last[] < 2/NET_HZ ? net_last[] + 1/NET_HZ : cs.t
+        NetPlay.send_pose!(NETLINK, net_id(), round(Int, cs.t*1000),
                            cs.x, cs.y, cs.z, cs.θ, cs.v, inp.steer; car = NETLINK.car)
 
         if NETMODE == "host" && !isempty(ai_poses)
@@ -3898,7 +4470,15 @@ function netlink_step!(cs, inp, frames, ai_poses, AICARS, CLINE, aibankK, ai_gro
     end
 
     netp = Tuple{Int,NTuple{6,Float64}}[]; empty!(NETVEL[])
+    dtn_ = dt_frame_net()
     for (id, q) in NetPlay.remote_poses_at(NETLINK, time())
+        NET_SMOOTH && (q = net_render_pose(id, NETLINK.remote[id], CLINE, dtn_))
+        if NET_ERR
+            pp_ = get(NET_DRAWN, id, nothing); tn_ = time()
+            pp_ === nothing || (dtn = tn_ - pp_[3]; 0 < dtn < 0.1 &&
+                (j_ = hypot(q.x - pp_[1] - q.v*cos(q.yaw)*dtn, q.z - pp_[2] - q.v*sin(q.yaw)*dtn); j_ < 5.0 && push!(NET_POPS, j_)))
+            NET_DRAWN[id] = (q.x, q.z, tn_)
+        end
         b = aibankK((q.x, 0.0, q.z, q.yaw))
         push!(netp, (Int(id), ai_ground((q.x, q.y, q.z, q.yaw, b[1], b[2]))))
         NETCARS[][Int(id)] = q.car
@@ -3908,11 +4488,16 @@ function netlink_step!(cs, inp, frames, ai_poses, AICARS, CLINE, aibankK, ai_gro
     if NET_ERR
         for (id, q) in NETLINK.remote
             pv = get(NET_PREV[], id, nothing)
+            net_hist!(id, q)
             if pv !== nothing && q.tick != pv.tick
                 dt = (q.tick - pv.tick) / 1000
                 if 0 < dt < 1.0
-                    pr = NetPlay.predict(pv, dt)
+                    pr = NET_LINEPRED ? net_line_predict(pv, dt, id, CLINE) : NET_TURNPRED ? net_turn_predict(pv, dt, id; cap = 1.0) : NetPlay.predict(pv, dt)
                     push!(NET_ERRS, hypot(q.x - pr.x, q.z - pr.z))
+                    p0 = NetPlay.predict(pv, dt); push!(NET_ERRS0, hypot(q.x - p0.x, q.z - p0.z))
+                    for (m, E) in NET_ERRSV
+                        pm = net_turn_predict(pv, dt, id; cap = 1.0, mode = m); push!(E, hypot(q.x - pm.x, q.z - pm.z))
+                    end
                     push!(NET_DTS, dt)
                 end
             end
@@ -3923,7 +4508,10 @@ function netlink_step!(cs, inp, frames, ai_poses, AICARS, CLINE, aibankK, ai_gro
             println("  [neterr] n=", length(NET_ERRS),
                     "  interval mean=", round(sum(NET_DTS)/length(NET_DTS), digits=3), "s",
                     "  ERR mean=", round(m, digits=4), " m  max=",
-                    round(maximum(NET_ERRS), digits=4), " m")
+                    round(maximum(NET_ERRS), digits=4), " m;  drawn jumps p99 ", isempty(NET_POPS) ? NaN : round(sort(NET_POPS)[max(1, ceil(Int, 0.99length(NET_POPS)))], digits = 3),
+                    " max ", isempty(NET_POPS) ? NaN : round(maximum(NET_POPS), digits = 3), " m, ", count(>(0.1), NET_POPS), " over 0.1 m; straight-line ERR mean ", round(sum(NET_ERRS0)/max(length(NET_ERRS0), 1), digits = 4), " m",
+                    join(["; $m $(round(sum(E)/max(length(E), 1), digits = 4)) p99 $(isempty(E) ? NaN : round(sort(E)[ceil(Int, 0.99length(E))], digits = 3))" for (m, E) in NET_ERRSV]),
+                    " (straight p99 ", isempty(NET_ERRS0) ? NaN : round(sort(NET_ERRS0)[ceil(Int, 0.99length(NET_ERRS0))], digits = 3), ")")
             flush(stdout)
         end
     end

@@ -150,6 +150,11 @@ uniform int uMacro;       // 1 = macro tiling break-up on (default; JM_MACRO=0 d
 // Offsetting the LOOKUP point along the surface normal by ~a shadow texel (uShadowNofs, m) kills flat-ground acne the
 // way the big bias did, so the bias can shrink (uShadowBiasK). 0 / 1 = the pre-S5 shading exactly.
 uniform mat4 uLightVP; uniform float uShadowNofs; uniform float uShadowBiasK;
+// TD261108-4 (PO 2026-11-08, Spa La Source: "levitation"): the car sat on the road (replay ground diag: +-0.04 m) but under a
+// low sun each tyre's shadow falls well to one side and the road under the tyre is lit -- nothing marks the contact. A soft
+// contact darkening (ambient occlusion) on up-facing surfaces round each tyre's contact point: uContact[i].xyz (world),
+// uContactK = (strength, radius m, height window m). uNContact = 0: none.
+uniform vec4 uContact[32]; uniform int uNContact; uniform vec3 uContactK;
 float shadow(vec3 N){
   float ndl = clamp(dot(normalize(N), normalize(uLightDir)), 0.0, 1.0);
   vec4 ls = uShadowNofs > 0.0 ? uLightVP*vec4(vWorld + normalize(N)*uShadowNofs*(1.0 - ndl), 1.0) : vLS;
@@ -226,6 +231,15 @@ void main(){
   // 0.9-1.1x whichever way they face (gold 260802 Spa t 92 vs the textures). The sky-tinted fill + strong sun above gave
   // up-facing roofs 1.2x in blue ("albino") and walls away from the sun 0.5x ("shaded sides too dark"). Neutral, flat-ish.
   if(uFlatOn==1) lit = base*(uFlat.x + uFlat.y*diff)*uBright;
+  if(uNContact > 0 && N.y > 0.3){
+    float occ = 0.0;
+    for(int i=0;i<32;i++){
+      if(i >= uNContact) break;
+      vec3 d = vWorld - uContact[i].xyz;
+      occ = max(occ, (1.0 - smoothstep(0.0, uContactK.y, length(d.xz))) * (1.0 - smoothstep(0.0, uContactK.z, abs(d.y))));
+    }
+    lit *= 1.0 - uContactK.x*occ;
+  }
   lit += uAmbFill*vec3(0.13,0.135,0.125);   // ADDITIVE fill: lifts pure-black cockpit parts
                                             // (tub/dash) to a visible dark grey, as Classic pre-lights them
   if(uSpec > 0.0){                               // Blinn-Phong sheen (painted/chrome bodywork)
@@ -434,7 +448,7 @@ end
 `center` (the car), so the shadow map tracks the action."""
 
 function light_vp(center, lightdir;
-                  R=parse(Float64, get(ENV, "JM_SHADOW_R", "70.0")),
+                  R=parse(Float64, get(ENV, "JM_SHADOW_R", "35.0")),
                   depth=parse(Float64, get(ENV, "JM_SHADOW_DEPTH", "120.0")))
     L=normalize(Float64.(lightdir)); eye=Float64.(center) .+ L.*(depth/2)
     up = abs(L[2])>0.99 ? [0.0,0.0,1.0] : [0.0,1.0,0.0]
@@ -454,15 +468,16 @@ function clip_planes!(prog, planes)
     buf = zeros(Float32, 16); for i in 1:n, j in 1:4; buf[4(i-1)+j] = Float32(planes[i][j]); end
     glUniform4fv(uloc(prog,"uClip[0]"), 4, buf); glUniform1i(uloc(prog,"uNClip"), n)
 end
-const SHADOW_NOFS  = parse(Float32, get(ENV, "JM_SHADOW_NOFS", "0.07"))
-const SHADOW_BIASK = parse(Float32, get(ENV, "JM_SHADOW_BIASK", "0.15"))
-const SHADOW_POFS = Tuple(parse.(Float32, split(get(ENV, "JM_SHADOW_POFS", "2.5,4.0"), ",")))
+
+shadow_nofs()  = parse(Float32, get(ENV, "JM_SHADOW_NOFS", "0.07"))
+shadow_biask() = parse(Float32, get(ENV, "JM_SHADOW_BIASK", "0.15"))
+shadow_pofs()  = Tuple(parse.(Float32, split(get(ENV, "JM_SHADOW_POFS", "2.5,4.0"), r"[,/]")))
 function shadow_pass(drawfn, depthprog, fbo, lightVP; size=SHADOW_SIZE)
 
     glClipControl(GL_LOWER_LEFT, GL_NEGATIVE_ONE_TO_ONE); glDepthFunc(GL_LESS); glClearDepth(1.0)
     glBindFramebuffer(GL_FRAMEBUFFER,fbo); glViewport(0,0,size,size); glClear(GL_DEPTH_BUFFER_BIT)
     glUseProgram(depthprog); glUniformMatrix4fv(uloc(depthprog,"uLightVP"),1,GL_FALSE,umat(lightVP))
-    glEnable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(SHADOW_POFS[1], SHADOW_POFS[2])
+    pofs = shadow_pofs(); glEnable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(pofs[1], pofs[2])
     drawfn(depthprog)
     glDisable(GL_POLYGON_OFFSET_FILL); glBindFramebuffer(GL_FRAMEBUFFER,0)
 end
@@ -488,7 +503,20 @@ function bind_shadow(prog, shadowtex, lightVP; unit=1, size=SHADOW_SIZE)
     glActiveTexture(GL_TEXTURE0+unit); glBindTexture(GL_TEXTURE_2D,shadowtex)
     glUniform1i(uloc(prog,"uShadow"),Int32(unit))
     glUniform1f(uloc(prog,"uShadowTexel"),Float32(1/size))
-    glUniform1f(uloc(prog,"uShadowNofs"),SHADOW_NOFS); glUniform1f(uloc(prog,"uShadowBiasK"),SHADOW_BIASK)
+    glUniform1f(uloc(prog,"uShadowNofs"),shadow_nofs()); glUniform1f(uloc(prog,"uShadowBiasK"),shadow_biask())
+end
+
+"""TD261108-4: the frame's tyre contact points (world, GL frame) for the contact darkening; k = (strength, radius, height window)."""
+function set_contacts!(prog, pts::Vector{NTuple{3,Float32}}, k::NTuple{3,Float32})
+    glUseProgram(prog)
+    n = min(length(pts), 32)
+    if n > 0
+        buf = Vector{Float32}(undef, 4n)
+        for i in 1:n; buf[4i-3] = pts[i][1]; buf[4i-2] = pts[i][2]; buf[4i-1] = pts[i][3]; buf[4i] = 0f0; end
+        glUniform4fv(uloc(prog,"uContact[0]"), n, buf)
+    end
+    glUniform1i(uloc(prog,"uNContact"), Int32(n)); glUniform3f(uloc(prog,"uContactK"), k[1], k[2], k[3])
+    nothing
 end
 
 """Per-frame scene uniforms (camera position + distance fog into the haze)."""
@@ -505,6 +533,7 @@ function set_scene_uniforms(prog, campos; fognear=300f0, fogfar=2400f0,
     glUniform1i(uloc(prog,"uMirrorGlass"),0)
     glUniform1i(uloc(prog,"uNClip"),0)
     glUniform1f(uloc(prog,"uMaxDist"),0f0)
+    glUniform1i(uloc(prog,"uNContact"),0)
     glUniform1i(uloc(prog,"uMacro"), get(ENV,"JM_MACRO","1")=="0" ? 0 : 1)
 end
 

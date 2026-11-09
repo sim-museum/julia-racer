@@ -165,11 +165,14 @@ end
 tyre_ring(i) = tt_colour((TT_SURF[i, 1] + TT_SURF[i, 2] + TT_SURF[i, 3])/3)
 
 const GAUGE_YEL = (1.0, 0.86, 0.10); const GAUGE_GRN = (0.25, 0.90, 0.30)
+
+const REP_ELAPSED = Ref((NaN, NaN))
+fmt_elapsed(t) = isfinite(t) ? (s = round(Int, 10max(t, 0.0)); string(s ÷ 600, ":", lpad((s ÷ 10) % 60, 2, '0'), ".", s % 10)) : "-:--.-"
 fmt_lapg(t) = (isfinite(t) && t > 0) ? (m = floor(Int, t/60); ms = round(Int, 1000*(t - 60m)); ms == 60_000 && (m += 1; ms = 0);
                                          string(m, ":", lpad(ms ÷ 1000, 2, '0'), ".", lpad(ms % 1000, 3, '0'))) : "--:--.---"
 fmt_split(t) = isfinite(t) ? (t < 0 ? "-" : "+") * (ms = round(Int, 1000abs(t)); string(ms ÷ 1000, ".", lpad(ms % 1000, 3, '0'))) : "--.---"
 band_textscale(h) = h/200
-"""Classic's rev counter in the box (x, y, w, h): the dial, its ticks to 10,000 rpm (red from 9,000), the needle, the gear in
+"""Classic's rev counter in the box (x, y, w, h): the dial, its ticks to the car's band (the Lotus: 10,000 rpm, red from 9,000), the needle, the gear in
 its yellow box, RPM, water/oil (F) and the speed (TD261029-2). Quads into bv, text into tv."""
 function band_tach!(bv, tv, box, rpm, gear, kph, water, oil; mode::String = "")
     (x, y, w, h) = box; R = min(w, h)/2; cx = x + w/2; cy = y + h/2; ts = R/80
@@ -177,10 +180,12 @@ function band_tach!(bv, tv, box, rpm, gear, kph, water, oil; mode::String = "")
     Render.hdisc!(bv, cx, cy, 0.93R, (0.30, 0.31, 0.33); seg = 40)
     Render.hdisc!(bv, cx, cy, 0.88R, (0.07, 0.07, 0.08); seg = 40)
     a0 = deg2rad(215.0); sweep = deg2rad(250.0)
-    ang(r) = a0 - sweep*clamp(r/10_000, 0.0, 1.0)
-    for k in 0:20
+
+    kR = DriveRT3D.CAR[].kR; rmax = 1000.0*ceil(10.0*kR - 1e-6); rred = 500.0*round(18.0*kR)
+    ang(r) = a0 - sweep*clamp(r/rmax, 0.0, 1.0)
+    for k in 0:round(Int, rmax/500)
         r = 500k; a = ang(r); major = iseven(k); r0 = major ? 0.66R : 0.73R
-        c = r >= 9000 ? (0.92, 0.12, 0.10) : (0.92, 0.92, 0.92)
+        c = r >= rred ? (0.92, 0.12, 0.10) : (0.92, 0.92, 0.92)
         Render.hline!(bv, cx + r0*cos(a), cy - r0*sin(a), cx + 0.84R*cos(a), cy - 0.84R*sin(a), major ? 2.6 : 1.4, c)
     end
     a = ang(rpm)
@@ -271,7 +276,11 @@ function hudband_draw!(cs, W, H, AICARS, best_lap, last_lap, lap_t0, race_done, 
         pk = st0 === nothing ? 1 : something(findfirst(e -> e[1] == 0, st0), 1)
         nf = st0 === nothing ? 1 : length(st0)
         lapn = REPCLK_ON[] ? REPCLK_LAPS[] : cs.laps
-        if IS_RACE && INC_ON && isempty(REPLAY_FILE_R[])
+        if !isempty(REPLAY_FILE_R[]) && isfinite(REP_ELAPSED[][1])
+            band_rows!(bv, gtv, L.pos, (("POS:", "$pk/$nf"), ("LAPS:", "$lapn/" * (IS_RACE ? string(RACE_LAPS_R[]) : "--")),
+                                        ("TIME:", string(fmt_elapsed(REP_ELAPSED[][1]), " / ", fmt_elapsed(REP_ELAPSED[][2]))));
+                       scale = 0.8band_textscale(L.pos[4]))
+        elseif IS_RACE && INC_ON && isempty(REPLAY_FILE_R[])
             band_rows!(bv, gtv, L.pos, (("POS:", "$pk/$nf"), ("LAPS:", "$lapn/" * string(RACE_LAPS_R[])), ("INC:", string(inc_points(0), "x")));
                        scale = 0.8band_textscale(L.pos[4]))
         else
@@ -333,6 +342,11 @@ function hudband_draw!(cs, W, H, AICARS, best_lap, last_lap, lap_t0, race_done, 
             end
         else
             push!(cars, (0, cs.x, cs.z, 0))
+
+            ai_poses === nothing || for (k, q) in enumerate(ai_poses)
+                (k in RAI_GONE || !isfinite(q[1]) || !isfinite(q[3])) && continue
+                push!(cars, (k, Float64(q[1]), Float64(q[3]), 0))
+            end
         end
         sf = line_xz(TRACKMAP, 0.0); mv = empty!(BAND_MV); mt = empty!(BAND_MT)
         trackmap_draw_fixed!(mv, mt, MAP_NUMS ? FONT : nothing, TRACKMAP, bx, by, bw, bh, cars, sf[1], sf[2], cs.x, cs.z)
@@ -440,3 +454,29 @@ band_tc(t) = ntuple(i -> (Float64(t[i][1]), Float64(t[i][2]), max((Float64(t[i][
 
 "Where a message goes: over the band's mirror (HUDBAND-1), else the old place over the 3D view."
 band_msg_y(H, old) = band_shown() ? BAND.mirror[2] + 10.0 : old
+
+const PITIN_ON = get(ENV, "JM_PITIN", "1") != "0"; const PITIN_FORCE = get(ENV, "JM_PITIN", "1") == "force"
+const PITIN_V = Float32[]; const PITIN_TV = Float32[]; const PITIN_DBG = Ref(0)
+"Your stall's front (world x, z) or nothing (no stalls / no pit frame)."
+player_stall_front() = (st = my_stall(); (st === nothing || PIT_STALL_T[] === nothing) ? nothing : CLASSICAI.tworld(PIT_STALL_T[], st[1] + 3.0, st[2]))
+function pitin_banner_draw!(vp, eye, W, H, called::Bool)
+    (PITIN_ON && (called || PITIN_FORCE) && FONT !== nothing) || return nothing
+    w = player_stall_front(); PITIN_FORCE && PITIN_DBG[] < 3 && (PITIN_DBG[] += 1; println("  [pitin] stall front ", w, " eye ", eye)); w === nothing && return nothing
+    gy = groundz(w[1], w[2]; hold = false); gy < -900 && return nothing
+    c = vp * Float32[w[1], gy + 1.6f0, -w[2], 1f0]
+    PITIN_FORCE && PITIN_DBG[] < 6 && (PITIN_DBG[] += 1; println("  [pitin] ground ", gy, " clip ", c))
+    c[4] <= 0.5f0 && return nothing
+    nx = c[1]/c[4]; ny = c[2]/c[4]; (abs(nx) > 1.2f0 || abs(ny) > 1.2f0) && return nothing
+    vh = view_h(); sx = (nx + 1f0)/2f0*W; sy = (H - vh) + (1f0 - ny)/2f0*vh
+    d = hypot(eye[1] - w[1], eye[2] - gy, eye[3] + w[2]); d > 400 && return nothing
+    bw = clamp(3000.0/max(d, 1.0), 48.0, 0.22W); bh = 0.42bw
+    v = empty!(PITIN_V)
+    Render.hquad!(v, sx - 0.42bw, sy, 0.035bw, 1.3bh, (0.25, 0.25, 0.25)); Render.hquad!(v, sx + 0.385bw, sy, 0.035bw, 1.3bh, (0.25, 0.25, 0.25))
+    Render.hquad!(v, sx - bw/2 - 0.04bw, sy - bh - 0.04bw, bw + 0.08bw, bh + 0.08bw, (0.05, 0.05, 0.05))
+    Render.hquad!(v, sx - bw/2, sy - bh, bw, bh, (0.98, 0.84, 0.10))
+    Render.hud_draw(hudprog, hudvao, hudvbo, v, W, H)
+    tv = empty!(PITIN_TV); t_ = "PIT IN"; sc = 0.62bh/18
+    Render.text!(tv, FONT, sx - Render.text_width(FONT, t_; scale = sc)/2, sy - 0.81bh, t_, (0.02, 0.02, 0.02); scale = sc)
+    Render.text_draw(textprog, textvao, textvbo, FONT, tv, W, H)
+    nothing
+end

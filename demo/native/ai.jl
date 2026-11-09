@@ -1022,14 +1022,24 @@ function plan!(cars::Vector{AICar}, line::AILine; player = nothing, scale = 1.0,
     vts
 end
 
+function path_curv(line::AILine, s, dev; h = 5.0)
+    a = pose_at(line, s - h, clamp(racelane(line, s - h) + dev, -LANE_MAX, LANE_MAX))
+    b = pose_at(line, s,     clamp(racelane(line, s)     + dev, -LANE_MAX, LANE_MAX))
+    c = pose_at(line, s + h, clamp(racelane(line, s + h) + dev, -LANE_MAX, LANE_MAX))
+    cr = (b[1] - a[1])*(c[3] - b[3]) - (b[3] - a[3])*(c[1] - b[1])
+    abs(2cr)/max(hypot(b[1] - a[1], b[3] - a[3])*hypot(c[1] - b[1], c[3] - b[3])*hypot(c[1] - a[1], c[3] - a[3]), 1e-9)
+end
+
 """Steering/throttle/brake for one hybrid-physics AI to track the RACING LINE (plus a pass
 `dev`iation, e.g. ±RAIL to pull out alongside) at speed `tv` (short-look-ahead pursuit +
 cross-track + yaw-damp, corner throttle-cut).  `cs`/`clane` = the car's current arc-length/
 lateral (from projection), `cθ`/`cv`/`r` its heading/speed/yaw-rate.  Returns (thr, brk, steer)."""
-function controller(line::AILine, cs, clane, dev, tv, cx, cz, cθ, cv, r; power = 1.0, pp = false, amax = 8.0, lo = -Inf, hi = Inf, holdwall = false, la_max = Inf)
+function controller(line::AILine, cs, clane, dev, tv, cx, cz, cθ, cv, r; power = 1.0, pp = false, amax = 8.0, lo = -Inf, hi = Inf, holdwall = false, la_max = Inf, vlat = Inf, pathk = false)
     la = clamp(6.0 + cv*0.35, 6.0, 20.0)
 
     κloc = max(curv_at(line, cs), curv_at(line, cs + 0.5*la), 1e-4)
+
+    pathk && (κloc = max(path_curv(line, cs, dev), path_curv(line, cs + 0.5*la, dev), 1e-4))
     pp && PP_LA_T > 0 && (la = max(la, PP_LA_T*cv))
     la = clamp(min(la, 0.32/κloc), 4.0, pp && PP_LA_T > 0 ? 45.0 : 20.0)
 
@@ -1040,7 +1050,14 @@ function controller(line::AILine, cs, clane, dev, tv, cx, cz, cθ, cv, r; power 
 
     holdwall && (here = clamp(here, lo, hi))
     lp = pose_at(line, cs + la, tlane)
-    herr = wrapπ(atan(lp[3]-cz, lp[1]-cx) - cθ)
+    ψt = atan(lp[3]-cz, lp[1]-cx)
+
+    if isfinite(vlat) && cv > 5.0
+        kp = pose_at(line, cs + la, clamp(clane, -LANE_MAX, LANE_MAX)); ψk = atan(kp[3]-cz, kp[1]-cx)
+        cap = atan(vlat/cv); dψ = wrapπ(ψt - ψk)
+        abs(dψ) > cap && (ψt = ψk + sign(dψ)*cap)
+    end
+    herr = wrapπ(ψt - cθ)
 
     slide = clamp((abs(r) - SPIN_LO) / (SPIN_HI - SPIN_LO), 0.0, 1.0)
     hgain = 3.0 * (1.0 - 0.45*slide)

@@ -61,7 +61,8 @@ function DrivenVehicle3D(; name,
     RR = brush ? BrushTyre(; name=:RR, br...,  camber=cmb, nsh=nshr, ns=nsrv) : Tyre(; name=:RR, TYRE_SKIDPAD_REAR...)
 
     gv, kfv, krv = g, karb_f, karb_r
-    ps = @parameters m=m Izz=Izz Ixx=Ixx Iyy=Iyy a=a b=b tf=tf tr=tr h=h mf=mf mr=mr L=L M_s=M_s g=g Rw_f=Rw_f Rw_r=Rw_r Iw=Iw η=η final=final bias=bias Tbrake_max=Tbrake_max CdA=CdA ρair=ρair throttle=throttle0 brake=brake0 δ=steer0 gear=gear0 clutch=0.0 hrc_f=0.0 hrc_r=0.0 ClAf=claf ClAf_rh=AERO_CLAF_RH ClAr=clar antistall=0.0 as_r0=1957.0 as_k=495.0 as_w=490.0 Ie=(ENGINE_LUMPED ? 0.18 : IE_ENGINE) Igb=(ENGINE_LUMPED ? 0.0 : DRIVELINE_INPUT ? 0.18 - IE_ENGINE : IE_DRIVELINE) c_c=60.0 T_cap=500.0 k_idle=0.5 idle_rpm=2000.0 zrFL=0.0 zrFR=0.0 zrRL=0.0 zrRR=0.0 vrFL=0.0 vrFR=0.0 vrRL=0.0 vrRR=0.0 Fx_ext=0.0 Fy_ext=0.0 Mz_ext=0.0 CdA_scale=1.0 sgx=0.0 sgy=0.0 c_abl=(cmb && USE_TYRE3 ? TYRE3.cabl : C_ABL) toe_f=toe_f toe_r=toe_r karb_f=karb_f karb_r=karb_r η_d=ETA_DRIVE
+
+    ps = @parameters ekR=ENGINE_KR[] ekP=ENGINE_KP[] m=m Izz=Izz Ixx=Ixx Iyy=Iyy a=a b=b tf=tf tr=tr h=h mf=mf mr=mr L=L M_s=M_s g=g Rw_f=Rw_f Rw_r=Rw_r Iw=Iw η=η final=final bias=bias Tbrake_max=Tbrake_max CdA=CdA ρair=ρair throttle=throttle0 brake=brake0 δ=steer0 gear=gear0 clutch=0.0 hrc_f=0.0 hrc_r=0.0 ClAf=claf ClAf_rh=AERO_CLAF_RH ClAr=clar antistall=0.0 as_r0=1957.0 as_k=495.0 as_w=490.0 Ie=(ENGINE_LUMPED ? 0.18 : IE_ENGINE) Igb=(ENGINE_LUMPED ? 0.0 : DRIVELINE_INPUT ? 0.18 - IE_ENGINE : IE_DRIVELINE) c_c=60.0 T_cap=500.0 k_idle=0.5 idle_rpm=2000.0 zrFL=0.0 zrFR=0.0 zrRL=0.0 zrRR=0.0 vrFL=0.0 vrFR=0.0 vrRL=0.0 vrRR=0.0 Fx_ext=0.0 Fy_ext=0.0 Mz_ext=0.0 CdA_scale=1.0 sgx=0.0 sgy=0.0 c_abl=(cmb && USE_TYRE3 ? TYRE3.cabl : C_ABL) toe_f=toe_f toe_r=toe_r karb_f=karb_f karb_r=karb_r η_d=ETA_DRIVE
     brk = BrakeSystem(; name = :brk, bias_p = brake_bias_p)
     tank = FuelTank(; name = :tank, x = tank_x)
     if cmb
@@ -185,7 +186,7 @@ function DrivenVehicle3D(; name,
     Tcl   = clu.T
 
     dens  = ENGINE_RHO ? ρair/RHO_WOT : 1.0
-    Teng  = ENGINE_LUMPED ? engine_torque(rpm, throttle; dens) : engine_torque_free(rpm, throttle; dens)
+    Teng  = ENGINE_LUMPED ? (ekP/ekR)*_engine_torque(rpm/ekR, throttle; dens) : (ekP/ekR)*_engine_torque_free(rpm/ekR, throttle; dens)
     Tgd   = ENGINE_LUMPED ? 0.0 : engage*gearbox_drag(ωgb*60/(2π), throttle)
     Tidle = clamp(k_idle*max(0.0, idle_rpm - rpm), 0.0, 120.0) * (1.0 - engage)
     run   = clamp((rpm - 300.0)/150.0, 0.0, 1.0)

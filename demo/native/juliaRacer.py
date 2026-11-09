@@ -115,6 +115,7 @@ CONTROLS = [
     ("Hide / show the top band (full-screen 3D)", "F"),
     ("Map zoom: whole track / medium / close up", "Z"),
     ("AI drives your car (3 s count-down) / take it back", "P"),
+    ("Pause / continue the session", "Pause"),
     ("Restart the race", "R"),
     ("Mute the engine", "M"),
     ("Leave the session", "Esc"),
@@ -252,6 +253,7 @@ class JoyMap:
         self.fullscreen_btn = 0
         self.map_btn = 0
         self.aidrive_btn = 0
+        self.pause_btn = 0
         self.deadzone = 0.06
         self.wheel_half_deg = 0.0
 
@@ -290,6 +292,8 @@ class JoyMap:
                 f.write(f"map_btn {self.map_btn}\n")
             if self.aidrive_btn > 0:
                 f.write(f"aidrive_btn {self.aidrive_btn}\n")
+            if self.pause_btn > 0:
+                f.write(f"pause_btn {self.pause_btn}\n")
             if self.wheel_half_deg > 0:
                 f.write(f"wheel_half_deg {self.wheel_half_deg}\n")
 
@@ -321,6 +325,7 @@ class JoyMap:
         m.fullscreen_btn = round(d.get("fullscreen_btn", 0))
         m.map_btn = round(d.get("map_btn", 0))
         m.aidrive_btn = round(d.get("aidrive_btn", 0))
+        m.pause_btn = round(d.get("pause_btn", 0))
         m.deadzone = d.get("deadzone", m.deadzone)
         m.wheel_half_deg = d.get("wheel_half_deg", 0.0)
         return m
@@ -578,6 +583,7 @@ STEPS = [
             "like the Z key) — or Skip."),
     ("aidrive", "Step 12 — Press the button that will hand your car to the AI driver and back during a race (a 3 s count-down "
                 "before the AI takes over; like the P key) — or Skip."),
+    ("pause", "Step 13 — Press the button that will PAUSE the session and resume it (like the Pause key) — or Skip."),
     ("done", "Done — review the live preview below, then Save."),
 ]
 STEP = {k: i for i, (k, _) in enumerate(STEPS)}
@@ -771,7 +777,7 @@ class CalibrateTab(QWidget):
             for i, lab in enumerate(getattr(self, "axis_labels", [])):
                 k = self.sweep.kind(i) if i < len(self.sweep.centre) else None
                 lab.setText(f"axis {i + 1}" + (f" · {k}" if k else ""))
-        if key in ("up", "dn", "clutch_btn", "fs", "map", "aidrive"):
+        if key in ("up", "dn", "clutch_btn", "fs", "map", "aidrive", "pause"):
             self._auto_button()
         elif key in ("steer", "throttle", "brake", "clutch"):
             self._auto_axis()
@@ -852,11 +858,11 @@ class CalibrateTab(QWidget):
         self.cap_b.setVisible(key in ("rest", "sweep", "wheel90"))
         self.cap_b.setEnabled(key in ("rest", "sweep", "wheel90"))
         self.alt_b.setVisible(key == "clutch")
-        self.skip_b.setVisible(key in ("clutch", "wheel90", "fs", "map", "aidrive"))
-        self.skip_b.setText("Skip" if key in ("wheel90", "fs", "map", "aidrive") else "No clutch")
+        self.skip_b.setVisible(key in ("clutch", "wheel90", "fs", "map", "aidrive", "pause"))
+        self.skip_b.setText("Skip" if key in ("wheel90", "fs", "map", "aidrive", "pause") else "No clutch")
         self.start_b.setText("Restart" if key != "idle" else "Start")
 
-        self._btn_armed = key not in ("up", "dn", "clutch_btn", "fs", "map", "aidrive")
+        self._btn_armed = key not in ("up", "dn", "clutch_btn", "fs", "map", "aidrive", "pause")
         self._btn_held = set()
         self._ax_armed = False; self._still = 0
         if key == "done":
@@ -900,6 +906,9 @@ class CalibrateTab(QWidget):
             self._goto("aidrive")
         elif STEPS[self.step][0] == "aidrive":
             self.work.aidrive_btn = 0
+            self._goto("pause")
+        elif STEPS[self.step][0] == "pause":
+            self.work.pause_btn = 0
             self._goto("done")
         elif STEPS[self.step][0] == "wheel90":
             self.work.wheel_half_deg = 0.0
@@ -1019,6 +1028,10 @@ class CalibrateTab(QWidget):
                 elif key == "aidrive":
                     self.work.aidrive_btn = i + 1
                     self.capl.setText(f"AI driver button = {i + 1}")
+                    self._goto("pause")
+                elif key == "pause":
+                    self.work.pause_btn = i + 1
+                    self.capl.setText(f"Pause button = {i + 1}")
                     self._goto("done")
                 return
 
@@ -1036,7 +1049,7 @@ class CalibrateTab(QWidget):
         m = self.work
         c = (f"steer ax{m.steer.axis}  thr ax{m.throttle.axis}  brk ax{m.brake.axis}  "
              f"clutch {'ax'+str(m.clutch.axis) if m.clutch.axis else ('btn'+str(m.clutch_btn) if m.clutch_btn else 'none')}  "
-             f"up b{m.up_btn} dn b{m.dn_btn}" + (f"  band b{m.fullscreen_btn}" if m.fullscreen_btn else "") + (f"  map b{m.map_btn}" if m.map_btn else "") + (f"  AI b{m.aidrive_btn}" if m.aidrive_btn else ""))
+             f"up b{m.up_btn} dn b{m.dn_btn}" + (f"  band b{m.fullscreen_btn}" if m.fullscreen_btn else "") + (f"  map b{m.map_btn}" if m.map_btn else "") + (f"  AI b{m.aidrive_btn}" if m.aidrive_btn else "") + (f"  pause b{m.pause_btn}" if m.pause_btn else ""))
         return c
 
     def save(self):
@@ -1097,7 +1110,8 @@ class DriveTab(QWidget):
             _ai = 6 if _ai == 5 else _ai
             st.setValue("session/ai", _ai); st.setValue("session/ai_v", "2")
         self.ai.setValue(_ai)
-        self.ai.setToolTip("Number of AI cars on the grid (up to 6: Eagle, Ferrari, Brabham, Cooper, Honda, BRM).")
+        self.ai.setToolTip("Number of AI cars (up to 6: Eagle, Ferrari, Brabham, Cooper, Honda, BRM). In a race they make the grid; "
+                           "in practice they come and go from their pit stalls as each driver prepares (none on the skidpad).")
         form.addWidget(self.ai, 3, 1)
         self.ai_pct_l = QLabel("Opponent pace:")
         form.addWidget(self.ai_pct_l, 4, 0)
@@ -1189,6 +1203,12 @@ class DriveTab(QWidget):
         self.playercar.currentIndexChanged.connect(lambda _: st.setValue("car/player", self.playercar.currentData()))
         self.playercar.currentIndexChanged.connect(lambda _: self.reload_setups() if hasattr(self, "carsetup") else None)
         cform.addWidget(self.playercar, 0, 1)
+
+        self._session_car = None
+        self.car_note = QLabel(""); self.car_note.setWordWrap(True); self.car_note.setStyleSheet("color: #e0b040;")
+        self.car_note.hide()
+        cform.addWidget(self.car_note, 4, 0, 1, 2)
+        self.playercar.currentIndexChanged.connect(lambda _: self._car_note_update())
 
         cform.addWidget(QLabel("Setup:"), 1, 0)
         self.carsetup = QComboBox()
@@ -1308,6 +1328,17 @@ class DriveTab(QWidget):
     def _mode_label(self):
         race = self.mode.currentIndex() == 1
         self.launch_b.setText("Start race" if race else "Start practice")
+
+    def _car_note_update(self):
+        """TD261108-2: while a session runs, a different car in the dropdown is for the next Start -- say so."""
+        run = self._session_car
+        cur = self.playercar.currentData() or "lotus"
+        if run is None or cur == run:
+            self.car_note.hide(); return
+        lab = {k: l for l, k in PLAYER_CARS}
+        self.car_note.setText(f"This session drives the {lab.get(run, run)}: the {lab.get(cur, cur)} is used from your next Start.")
+        self.car_note.show()
+        self._status(self.car_note.text())
 
     def _status(self, msg):
         w = self.window()
@@ -1582,11 +1613,13 @@ class DriveTab(QWidget):
             qenv.insert("JM_NET_HOST", self.net_host.text().strip())
 
     def _mode_changed(self, idx):
-        """Race (idx 1) needs opponents and can't run on the skidpad; Practice is a lone car
-        (no Laps / AI cars / AI speed — those rows are hidden)."""
+        """Race (idx 1) needs opponents and can't run on the skidpad; Practice has no Laps / qualifying rows.
+        PRACTICE-FIELD-1: the AI cars (and their speed) practise too, so those rows show in both."""
         is_race = (idx == 1)
-        for w in (self.laps_l, self.laps, self.ai_l, self.ai, self.ai_pct_l, self.ai_pct, self.ai_pct_note, self.qual):
+        for w in (self.laps_l, self.laps, self.qual):
             w.setVisible(is_race)
+        for w in (self.ai_l, self.ai, self.ai_pct_l, self.ai_pct, self.ai_pct_note):
+            w.setVisible(True)
         if hasattr(self, "launch_b"):
             self._mode_label()
         skid = self.track.model().item(1)
@@ -1703,9 +1736,11 @@ class DriveTab(QWidget):
         is_race = (self.mode.currentIndex() == 1)
         qenv.insert("JM_MODE", "race" if is_race else "practice")
         qenv.insert("JM_LAPS", str(self.laps.value()))
-        qenv.insert("JM_AI", str(self.ai.value() if is_race else 0))
+
+        qenv.insert("JM_AI", str(self.ai.value() if (is_race or self.track.currentIndex() != 1) else 0))
         qenv.insert("JM_AI_PCT", str(self.ai_pct.value()))
         qenv.insert("JM_PLAYER_CAR", self.playercar.currentData() or "lotus")
+        self._session_car = self.playercar.currentData() or "lotus"; self._car_note_update()
         wet = self.wet.currentData() or "1"
         wet != "1" and qenv.insert("JM_WETNESS", wet)
         qenv.insert("JM_AI_STYLE", self.aistyle.currentData() or "line")
@@ -1929,6 +1964,7 @@ class DriveTab(QWidget):
         self._session_over(failed)
 
     def _session_over(self, failed):
+        self._session_car = None; self._car_note_update()
         self.log.appendPlainText("\n— session over —" if getattr(self, "_warm", False) else "\n— game exited —")
 
         w = self.window()

@@ -19,7 +19,13 @@ const REVERSE_ON = get(ENV, "JM_REVERSE", "1") != "0"
 
 const REVERSE_RATIO = 4.00
 const REVERSE_VMAX  = 2.0
-gearratio(g::Int) = g == -1 ? -REVERSE_RATIO : g <= 0 ? 0.0 : GEARS[g]
+
+const GEARS6 = Set(["BRM"])
+const GEARBOX6_ON = Ref(true)
+ngears() = (GEARBOX6_ON[] && CAR[].name in GEARS6) ? 6 : length(GEARS)
+"Gear `g`'s ratio from the 5-ratio set `gs` for a car with `n` forward gears (n = 6: 1st to top in 5 geometric steps)."
+ratio_n(gs, g::Int, n::Int) = n == length(gs) ? gs[g] : gs[1] * (gs[end]/gs[1])^((g - 1)/(n - 1))
+gearratio(g::Int) = g == -1 ? -REVERSE_RATIO : g <= 0 ? 0.0 : ratio_n(GEARS, min(g, ngears()), ngears())
 const FINAL = Ref(4.11)
 const TRANS_SRC = Ref("built-in fallback (SKIDPAD setup -- NOT from an ibt)")
 
@@ -104,6 +110,7 @@ const CAR = Ref(CAR_PHYS["Lotus"])
 "Make `name` the car the next build_car3d builds (its engine too). Unknown names, or JM_CARPHYS=0, give the Lotus."
 function set_car!(name::AbstractString)
     CAR[] = get(ENV, "JM_CARPHYS", "1") == "0" ? CAR_PHYS["Lotus"] : get(CAR_PHYS, String(name), CAR_PHYS["Lotus"])
+    GEARBOX6_ON[] = get(ENV, "JM_GEARBOX6", "1") != "0"
     ENGINE_KR[] = CAR[].kR; ENGINE_KP[] = CAR[].kP
     nothing
 end
@@ -119,7 +126,7 @@ car_describe() = (c = CAR[]; c.name == "Lotus" ? "Lotus 49 (the reference car)" 
     string(c.name, ": the Lotus 49 model with mass ", round(car_mass(), digits = 1), " kg (", c.dm >= 0 ? "+" : "", c.dm, "), wheelbase ",
            round(wheelbase(), digits = 3), " m, tracks ", round(1.5 + c.dtf, digits = 3), " / ", round(1.5 + c.dtr, digits = 3),
            " m, engine x", round(c.kP, digits = 3), " power over x", round(c.kR, digits = 3), " rpm (redline ", round(Int, 9500c.kR),
-           "), final ", round(final_eff(), digits = 3)))
+           "), final ", round(final_eff(), digits = 3), ngears() == 6 ? string(", 6 speeds ", join(round.([ratio_n(GEARS, g, 6) for g in 1:6], digits = 3), "/")) : ""))
 "Run f with the Lotus as the car (the AI's physics cars), then restore."
 function with_lotus(f)
     old = CAR[]; set_car!("Lotus")
@@ -182,6 +189,21 @@ Base.@kwdef mutable struct Chassis
 end
 const CHASSIS = Ref(Chassis())
 set_chassis!(ch::Chassis) = (CHASSIS[] = ch; nothing)
+
+setup_snapshot() = (copy(GEARS), FINAL[], TRANS_SRC[], SHIFT_RPM[], SHIFT_SRC[], MASS[], FRONT_FRAC[], CORNER_W[], KS[], KS_SRC[],
+                    CHASSIS[], RIDE_H[], RIDE_H_SRC[])
+"A built car's parameter by name (e.g. \"sFL₊ks\"), or NaN (AI-SETUP-1 S3's readback)."
+function carparam(c, name::AbstractString)
+    for p in ModelingToolkit.parameters(c.sys)
+        string(p) == name && return Float64(ModelingToolkit.getp(c.sys, p)(c.integ))
+    end
+    NaN
+end
+function setup_restore!(s)
+    copyto!(GEARS, s[1]); FINAL[] = s[2]; TRANS_SRC[] = s[3]; SHIFT_RPM[] = s[4]; SHIFT_SRC[] = s[5]; MASS[] = s[6]; FRONT_FRAC[] = s[7]
+    CORNER_W[] = s[8]; KS[] = s[9]; KS_SRC[] = s[10]; CHASSIS[] = s[11]; RIDE_H[] = s[12]; RIDE_H_SRC[] = s[13]
+    nothing
+end
 
 """Toe-in per wheel [rad] from the garage's toe [mm], read as the toe at the tyre's edge -- across its diameter."""
 
@@ -561,18 +583,108 @@ function _phys_alg(n)
     m == "fd" ? Rosenbrock23(autodiff = AutoFiniteDiff()) : m == "ad" ? Rosenbrock23() : Rosenbrock23(autodiff = AutoForwardDiff(chunksize = n))
 end
 
-function build_car3d(; x0 = 0.0, z0 = 0.0, θ0 = 0.0, v0 = 0.0, y0 = 0.0,
-                     brush = !haskey(ENV, "JM_MAGIC"), dt = 1/300)
-    SLOPE_G[] = get(ENV, "JM_SLOPE_GRAVITY", "1") != "0"
-    SLOPE_DIAG[] = parse(Float64, get(ENV, "JM_SLOPE_DIAG", "0"))
+"The (uncompiled) vehicle model of the current car (CAR[]) on the current session setup -- what build_car3d compiles."
+function _vehicle_model(brush)
     _cp = CAR[]; _car = _cp.name == "Lotus" ? NamedTuple() : (tf = 1.5 + _cp.dtf, tr = 1.5 + _cp.dtr, iscale = car_iscale())
-    sys = mtkcompile(DrivenVehicle3D(name = :car, brush = brush, final = final_eff(), m = car_mass(), front_frac = FRONT_FRAC[],
+    DrivenVehicle3D(name = :car, brush = brush, final = final_eff(), m = car_mass(), front_frac = FRONT_FRAC[],
                     fl_corner = _corner(:f, KS[][1]; i = 1), fr_corner = _corner(:f, KS[][2]; i = 2),
                     rl_corner = _corner(:r, KS[][3]; i = 3), rr_corner = _corner(:r, KS[][4]; i = 4),
-                    a = cg_arms()[1], b = cg_arms()[2]; _car..., _chassis_kw()...))
+                    a = cg_arms()[1], b = cg_arms()[2]; _car..., _chassis_kw()...)
+end
+
+ai_carphys_on() = get(ENV, "JM_AI_CARPHYS", "1") != "0"
+const AUTO_NEUTRAL = Ref(true)
+const CAR_OF = IdDict{Any,CarPhys}()
+_pval(v) = (x = ModelingToolkit.Symbolics.value(v); x isa Real ? Float64(x) : nothing)
+"Numeric parameter defaults of the current car's uncompiled model, by name."
+function _vehicle_pdefaults(brush)
+
+    m0 = _vehicle_model(brush); d = ModelingToolkit.initial_conditions(m0); out = Dict{String,Float64}()
+    for p in ModelingToolkit.parameters(m0)
+        haskey(d, p) || continue
+        x = _pval(d[p]); x === nothing || (out[string(p)] = x)
+    end
+    out
+end
+
+function _ai_chassis_scale!(mine, lot)
+    get(ENV, "JM_AI_SETUP", "1") == "0" && return mine
+    all(d -> haskey(d, "mf") && haskey(d, "mr"), (mine, lot)) || return mine
+    rf = mine["mf"]/lot["mf"]; rr = mine["mr"]/lot["mr"]
+    for k in collect(keys(mine))
+        haskey(lot, k) || continue
+        r = (occursin(r"^s(FL|FR)₊(ks|cs)$", k) || k in ("arbF₊k", "karb_f")) ? rf :
+            (occursin(r"^s(RL|RR)₊(ks|cs)$", k) || k in ("arbR₊k", "karb_r")) ? rr : 0.0
+        r > 0 && (mine[k] = lot[k]*r)
+    end
+    mine
+end
+"The parameters (by name) where chassis `name` differs from the Lotus on this session's setup (AI-SETUP-1: its suspension scaled)."
+function carphys_overrides(name::AbstractString; brush = !haskey(ENV, "JM_MAGIC"))
+    lot = with_lotus(() -> _vehicle_pdefaults(brush))
+    old = CAR[]; set_car!(name)
+    try
+        mine = _ai_chassis_scale!(_vehicle_pdefaults(brush), lot)
+        Dict(k => v for (k, v) in mine if haskey(lot, k) && !isapprox(v, lot[k]; rtol = 1e-12, atol = 0.0))
+    finally
+        CAR[] = old; ENGINE_KR[] = old.kR; ENGINE_KP[] = old.kP
+    end
+end
+"Write chassis `cp`'s parameter overrides `ov` into car c and register it for the run-time switch."
+function set_carphys!(c, cp::CarPhys, ov::Dict{String,Float64})
+    P = Dict(string(p) => p for p in ModelingToolkit.parameters(c.sys))
+    nset = 0
+    for (k, v) in ov
+        haskey(P, k) || continue
+        ModelingToolkit.setp(c.sys, P[k])(c.integ, v); nset += 1
+    end
+    CAR_OF[c] = cp
+    nset
+end
+_use_car!(cp::CarPhys) = (CAR[] = cp; ENGINE_KR[] = cp.kR; ENGINE_KP[] = cp.kP; nothing)
+
+const GEAR_OF = IdDict{Any,Tuple{Vector{Float64},Float64}}()
+const GEARS0 = copy(GEARS); const FINAL0 = FINAL[]
+const _GSAVE = zeros(length(GEARS))
+function set_cargear!(c, gears::AbstractVector, final::Real)
+    length(gears) == length(GEARS) || error("set_cargear!: expected $(length(GEARS)) ratios")
+    kR = haskey(CAR_OF, c) ? CAR_OF[c].kR : 1.0
+    ModelingToolkit.setp(c.sys, c.sys.final)(c.integ, float(final)*kR)
+    GEAR_OF[c] = (Float64.(gears), Float64(final))
+    n_ = (haskey(CAR_OF, c) && CAR_OF[c].name in GEARS6 && GEARBOX6_ON[]) ? 6 : length(GEARS)
+    c.gear >= 1 && c.s_gr(c.integ, ratio_n(GEAR_OF[c][1], min(c.gear, n_), n_))
+    nothing
+end
+
+const _PROB_CACHE = Dict{UInt,Tuple{Any,Any}}()
+_sys_fp(sys) = hash((string.(ModelingToolkit.equations(sys)), string.(ModelingToolkit.observed(sys)),
+                     sort([string(k) => string(v) for (k, v) in ModelingToolkit.initial_conditions(sys)])))
+function _cached_problem(sys, u0f, jac)
+    get(ENV, "JM_PROBCACHE", "1") == "0" && return sys, ODEProblem(sys, u0f(sys), (0.0, 1e7); jac = jac)
+    key = hash((jac, _sys_fp(sys)))
+    hit = get(_PROB_CACHE, key, nothing)
+    if hit === nothing
+        prob = ODEProblem(sys, u0f(sys), (0.0, 1e7); jac = jac)
+        _PROB_CACHE[key] = (sys, deepcopy(prob))
+        return sys, prob
+    end
+    s0, p0 = hit; pr = deepcopy(p0); u0 = copy(pr.u0)
+    for (k, v) in u0f(s0)
+        ix = ModelingToolkit.variable_index(s0, k); ix === nothing || (u0[ix] = v)
+    end
+    get(ENV, "JM_PROBCACHE_DIAG", "0") != "0" && println("  [probcache] reused the generated problem (", length(_PROB_CACHE), " cached)")
+    return s0, remake(pr; u0 = u0)
+end
+
+function build_car3d(; x0 = 0.0, z0 = 0.0, θ0 = 0.0, v0 = 0.0, y0 = 0.0,
+                     brush = !haskey(ENV, "JM_MAGIC"), dt = 1/300)
+    AUTO_NEUTRAL[] = get(ENV, "JM_AUTO_NEUTRAL", "1") != "0"
+    SLOPE_G[] = get(ENV, "JM_SLOPE_GRAVITY", "1") != "0"
+    SLOPE_DIAG[] = parse(Float64, get(ENV, "JM_SLOPE_DIAG", "0"))
+    sys = mtkcompile(_vehicle_model(brush))
     println(brush ? "  TYRE (3-D): physics-based brush model (default)" : "  TYRE (3-D): Magic-Formula tyre (JM_MAGIC)")
-    prob = ODEProblem(sys, [sys.u => v0, sys.ωf => v0/0.30, _wheel_u0(sys, v0)...,
-                            sys.ωe => 209.4, sys.X => x0, sys.Y => z0, sys.ψ => θ0], (0.0, 1e7); jac = _phys_jac())
+    sys, prob = _cached_problem(sys, s -> [s.u => v0, s.ωf => v0/0.30, _wheel_u0(s, v0)...,
+                                           s.ωe => 209.4, s.X => x0, s.Y => z0, s.ψ => θ0], _phys_jac())
 
     integ = init(prob, _phys_alg(length(prob.u0)); save_everystep = false, dense = false, adaptive = false, dt = dt)
     ModelingToolkit.setp(sys, sys.antistall)(integ, ANTISTALL[] ? 1.0 : 0.0)
@@ -591,7 +703,7 @@ function build_car3d(; x0 = 0.0, z0 = 0.0, θ0 = 0.0, v0 = 0.0, y0 = 0.0,
               getall, 1, y0, ntuple(_->0.0,4),
               x0, y0, z0, θ0, v0, 0.0, 0.0, 1, ntuple(_->(0.0,0.0,0.0),4),
               0.0, 0, 0.0, 0.0, true, 0.0, 0.0, 9.80665, 0.0, RIDE_H[], false, 0.0, 0.0, false, (0.0, 0.0), false, -Inf)
-    c.s_gr(c.integ, GEARS[c.gear]); getall(integ)
+    c.s_gr(c.integ, gearratio(c.gear)); getall(integ)
     for _ in 1:3; step_car3d!(c, 0.3, 0.0, 0.0, 1/60); end
     for _ in 1:3; step_car3d!(c, 0.3, 0.0, 0.0, 1/60; clutch = 0.5, manual = true); end
     reinit!(c.integ); c.gear = 0; c.s_gr(c.integ, 0.0)
@@ -603,16 +715,18 @@ end
 
 """Compile the 3-D car ONCE and build `length(poses)` cars sharing the system (so a field of
 3-D AI doesn't pay N× mtkcompile).  `poses` = Vector of (x0,z0,θ0,v0)."""
-function build_cars3d(poses; brush = !haskey(ENV, "JM_MAGIC"), dt = 1/300)
-    with_lotus(() -> _build_cars3d(poses; brush, dt))
+function build_cars3d(poses; brush = !haskey(ENV, "JM_MAGIC"), dt = 1/300, names = nothing)
+    with_lotus(() -> _build_cars3d(poses; brush, dt, names))
 end
-function _build_cars3d(poses; brush = !haskey(ENV, "JM_MAGIC"), dt = 1/300)
+function _build_cars3d(poses; brush = !haskey(ENV, "JM_MAGIC"), dt = 1/300, names = nothing)
     SLOPE_G[] = get(ENV, "JM_SLOPE_GRAVITY", "1") != "0"
     SLOPE_DIAG[] = parse(Float64, get(ENV, "JM_SLOPE_DIAG", "0"))
     sys = mtkcompile(DrivenVehicle3D(name = :car, brush = brush, final = FINAL[], m = MASS[], front_frac = FRONT_FRAC[],
                     fl_corner = _corner(:f, KS[][1]; i = 1), fr_corner = _corner(:f, KS[][2]; i = 2),
                     rl_corner = _corner(:r, KS[][3]; i = 3), rr_corner = _corner(:r, KS[][4]; i = 4),
                     a = cg_arms()[1], b = cg_arms()[2]; _chassis_kw()...))
+    u0map_(s, (x0, z0, θ0, v0)) = [s.u=>v0, s.ωf=>v0/0.30, _wheel_u0(s, v0)..., s.ωe=>209.4, s.X=>x0, s.Y=>z0, s.ψ=>θ0]
+    sys, prob0 = isempty(poses) ? (sys, nothing) : _cached_problem(sys, s -> u0map_(s, first(poses)), _phys_jac())
     s_thr=setp(sys,sys.throttle); s_brk=setp(sys,sys.brake); s_st=setp(sys,sys.δ)
     s_gr=setp(sys,sys.gear); s_clu=setp(sys,sys.clutch); s_we=ModelingToolkit.setu(sys,sys.ωe)
     s_zr=(setp(sys,sys.zrFL),setp(sys,sys.zrFR),setp(sys,sys.zrRL),setp(sys,sys.zrRR))
@@ -627,11 +741,20 @@ function _build_cars3d(poses; brush = !haskey(ENV, "JM_MAGIC"), dt = 1/300)
         sys.z, sys.th, sys.ph, sys.az, sys.FzFL, sys.FzFR, sys.FzRL, sys.FzRR, sys.ωr])
     cars=Car3D[]
 
-    prob0 = nothing
-    for (x0,z0,θ0,v0) in poses
-        u0map = [sys.u=>v0, sys.ωf=>v0/0.30, _wheel_u0(sys, v0)..., sys.ωe=>209.4, sys.X=>x0, sys.Y=>z0, sys.ψ=>θ0]
-        if prob0 === nothing
-            prob0 = ODEProblem(sys, u0map, (0.0,1e7); jac = _phys_jac()); prob = prob0
+    OV = Dict{String,Dict{String,Float64}}()
+    if ai_carphys_on() && names !== nothing
+        for nm in unique(String.(names))
+            (nm == "Lotus" || !haskey(CAR_PHYS, nm)) && continue
+            _t = time(); OV[nm] = carphys_overrides(nm; brush)
+            println("  [aicarphys] ", nm, ": ", length(OV[nm]), " parameters differ from the Lotus (", round(time() - _t, digits = 1), " s): ",
+                    join((string(k, " ", round(OV[nm][k], sigdigits = 4)) for k in sort(collect(keys(OV[nm])))[1:min(end, 24)]), ", "))
+        end
+    end
+
+    for (ip, (x0,z0,θ0,v0)) in enumerate(poses)
+        u0map = u0map_(sys, (x0, z0, θ0, v0))
+        if ip == 1
+            prob = prob0
         else
             u0 = copy(prob0.u0)
             for (k, v) in u0map
@@ -645,7 +768,11 @@ function _build_cars3d(poses; brush = !haskey(ENV, "JM_MAGIC"), dt = 1/300)
                   getall, 1, 0.0, ntuple(_->0.0,4),
                   x0, 0.0, z0, θ0, v0, 0.0, 0.0, 1, ntuple(_->(0.0,0.0,0.0),4),
                   0.0, 0, 0.0, 0.0, true, 0.0, 0.0, 9.80665, 0.0, RIDE_H[], false, 0.0, 0.0, false, (0.0, 0.0), false, -Inf)
-        c.s_gr(c.integ, GEARS[c.gear]); getall(integ)
+        if names !== nothing && haskey(OV, String(names[length(cars) + 1]))
+            nm = String(names[length(cars) + 1]); nset = set_carphys!(c, CAR_PHYS[nm], OV[nm])
+            nset == length(OV[nm]) || println("  [aicarphys] WARNING: ", nm, ": ", nset, " of ", length(OV[nm]), " differing parameters found in the compiled model")
+        end
+        c.s_gr(c.integ, gearratio(c.gear)); getall(integ)
         for _ in 1:3; step_car3d!(c, 0.3, 0.0, 0.0, 1/60); end
         for _ in 1:3; step_car3d!(c, 0.3, 0.0, 0.0, 1/60; clutch=0.5, manual=true); end
         reinit!(c.integ); c.gear=0; c.s_gr(c.integ, 0.0)
@@ -751,9 +878,25 @@ gives terrain elevation (used to drive the suspension under each wheel)."
 function step_car3d!(c::Car3D, throttle, brake, steer, dt;
                      clutch = 0.0, up = false, dn = false, manual = false,
                      groundz = (x,z)->0.0, lock = 1.0)
+    if !isempty(CAR_OF) || !isempty(GEAR_OF)
+        cp = get(CAR_OF, c, nothing); gf = get(GEAR_OF, c, nothing)
+        swc = cp !== nothing && cp !== CAR[]
+        swg = gf !== nothing && (FINAL[] != gf[2] || GEARS != gf[1])
+        if swc || swg
+            old = CAR[]; fo = FINAL[]
+            swc && _use_car!(cp)
+            swg && (copyto!(_GSAVE, GEARS); copyto!(GEARS, gf[1]); FINAL[] = gf[2])
+            try
+                return step_car3d!(c, throttle, brake, steer, dt; clutch = clutch, up = up, dn = dn, manual = manual, groundz = groundz, lock = lock)
+            finally
+                swc && _use_car!(old)
+                swg && (copyto!(GEARS, _GSAVE); FINAL[] = fo)
+            end
+        end
+    end
     if manual
         c.s_clu(c.integ, clamp(clutch, 0, 1))
-        up && c.gear < 5 && (c.gear += 1; c.s_gr(c.integ, gearratio(c.gear)))
+        up && c.gear < ngears() && (c.gear += 1; c.s_gr(c.integ, gearratio(c.gear)))
         dn && (c.gear > 0 || (REVERSE_ON && c.gear == 0 && abs(c.v) < REVERSE_VMAX)) && (c.gear -= 1; c.s_gr(c.integ, gearratio(c.gear)))
     else
 
@@ -763,10 +906,10 @@ function step_car3d!(c::Car3D, throttle, brake, steer, dt;
             c.gear = 0
         end
 
-        if c.gear == 0
+        if c.gear == 0 && (!AUTO_NEUTRAL[] || throttle >= 0.05)
             g = 1
-            while g < 5 && abs(c.v) > 0.9 * (9500.0*2π/60) / (GEARS[g]*FINAL[]) * RW_R; g += 1; end
-            c.gear = g; c.s_gr(c.integ, GEARS[g])
+            while g < ngears() && abs(c.v) > 0.9 * (9500.0*2π/60) / (gearratio(g)*FINAL[]) * RW_R; g += 1; end
+            c.gear = g; c.s_gr(c.integ, gearratio(g))
         end
         held = abs(c.v) < 1.0 && throttle < 0.05
         ae = held ? 0.0 : clamp((c.rpm - 1400.0)/1000.0, 0, 1) * clamp(max(2*throttle, c.v/2), 0, 1)
@@ -853,10 +996,10 @@ function step_car3d!(c::Car3D, throttle, brake, steer, dt;
     (!isfinite(c.v) || abs(c.v) > 110) && return respawn3d!(c)
     if !manual && c.gear >= 1
 
-        grpm = (a[4]/RW_R)*GEARS[c.gear]*FINAL[]*60/(2π)
+        grpm = (a[4]/RW_R)*gearratio(c.gear)*FINAL[]*60/(2π)
         up_rpm = SHIFT_RPM[]
-        if grpm > up_rpm && c.gear < 5;                      c.gear += 1; c.s_gr(c.integ, GEARS[c.gear])
-        elseif grpm < 4100 && c.gear > 1 && throttle < 0.85; c.gear -= 1; c.s_gr(c.integ, GEARS[c.gear]); end
+        if grpm > up_rpm && c.gear < ngears();               c.gear += 1; c.s_gr(c.integ, gearratio(c.gear))
+        elseif grpm < 4100 && c.gear > 1 && throttle < 0.85; c.gear -= 1; c.s_gr(c.integ, gearratio(c.gear)); end
     end
     c
 end

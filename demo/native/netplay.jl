@@ -27,6 +27,7 @@ const DEFAULT_PORT = 47700
 
 const REFMAGIC = UInt32(0x4A4D5246)
 const REF_VERSION, REF_NEEDPW, REF_BADPW = UInt8(1), UInt8(2), UInt8(3)
+const REF_ID = UInt8(5)
 const REF_CAR = UInt8(4)
 const NOREPLY_S = 10.0
 const OLDPKTSIZE = CARLESS_PKTSIZE - 4
@@ -57,7 +58,15 @@ mutable struct NetLink
     carbad::Int
     car::UInt8
     carname::String
+
+    myid::UInt8
+    idof::Dict{Tuple{IPAddr,Int},UInt8}
+    relayed::Int
 end
+"PITSTALL-2 S4: JM_NET_ASSIGN=0 = before (no ids assigned, no relay; a racer learns peers). Read per call (gates flip it)."
+assign_on() = get(ENV, "JM_NET_ASSIGN", "1") != "0"
+"The car id to send as: the host's assignment once it has come, else `default` (JM_NET_ID)."
+myid(n::NetLink, default::Integer) = n.myid != 0 ? Int(n.myid) : Int(default)
 
 """    netopen(; port, peer) -> NetLink
 
@@ -78,7 +87,7 @@ function netopen(; port::Int = DEFAULT_PORT, peer = nothing, password::AbstractS
     peer === nothing || push!(peers, (getaddrinfo(String(peer[1])), Int(peer[2])))
     n = NetLink(r, sk, port, peers, Dict{UInt8,NamedTuple}(), Dict{UInt8,Float64}(),
                 Channel{Tuple{IPAddr,Int,Vector{UInt8}}}(256), nothing, 0, 0, 0, passwordtag(password), peer === nothing, 0, true, "",
-                "", Dict{Tuple{IPAddr,Int},Float64}(), time(), 0, 0xff, "")
+                "", Dict{Tuple{IPAddr,Int},Float64}(), time(), 0, 0xff, "", 0x00, Dict{Tuple{IPAddr,Int},UInt8}(), 0)
     n.task = @async begin
         while n.open
             try
@@ -167,6 +176,13 @@ function poll!(n::NetLink; maxpkts::Int = 64)
     while got < maxpkts && isready(n.inbox)
         (host, port, buf) = take!(n.inbox)
         if length(buf) >= 6 && reinterpret(UInt32, buf[1:4])[1] == REFMAGIC
+            if !n.ishost && buf[5] == REF_ID
+                nv = Int(buf[6]); a = tryparse(Int, String(buf[7:min(end, 6 + nv)]))
+                if a !== nothing && 2 <= a < AI_ID0 && a != n.myid
+                    n.myid = UInt8(a); println("  netplay: the host gives us car id ", a, " (stall_", a - 1, ")"); flush(stdout)
+                end
+                continue
+            end
             if !n.ishost && isempty(n.refused)
                 nv = Int(buf[6]); hv = String(buf[7:min(end, 6 + nv)])
                 n.refused = refusal_text(buf[5], hv)
@@ -202,13 +218,32 @@ function poll!(n::NetLink; maxpkts::Int = 64)
         end
         id = read(io, UInt8); tick = read(io, UInt32)
         lport = Int(read(io, UInt16))
+        if n.ishost && lport > 0 && id < AI_ID0 && assign_on()
+            k = (host, lport); aid = get(n.idof, k, 0x00); fresh = aid == 0x00
+            if fresh
+                taken = Set(values(n.idof))
+                free = [UInt8(j) for j in 2:(Int(AI_ID0) - 1) if !(UInt8(j) in taken)]
+                aid = (2 <= id < AI_ID0 && !(id in taken)) ? id : isempty(free) ? id : free[1]
+                n.idof[k] = aid
+                println("  netplay: racer ", host, ":", lport, " is car ", Int(aid), id == aid ? "" : string(" (it asked for ", Int(id), ")"),
+                        " -- stall_", Int(aid) - 1); flush(stdout)
+            end
+            fresh && delete!(n.reftime, k); (fresh || id != aid) && refuse!(n, host, lport, REF_ID; text = string(Int(aid)))
+            id = aid
+            fw = copy(buf); fw[13] = aid
+            for (h, p) in n.peers
+                (h == host && p == lport) && continue
+                try; send(n.ssock, h, p, fw); n.relayed += 1; catch; end
+            end
+        end
         x = read(io, Float32); y = read(io, Float32); z = read(io, Float32)
         yaw = read(io, Float32); v = read(io, Float32); st = read(io, Float32); car = read(io, UInt8)
         n.remote[id] = (tick = Int(tick), x = Float64(x), y = Float64(y), z = Float64(z),
                         yaw = Float64(yaw), v = Float64(v), steer = Float64(st), car = car)
         n.rxtime[id] = time()
         n.rx += 1; got += 1
-        any(p -> p[1] == host && p[2] == lport, n.peers) || push!(n.peers, (host, lport))
+
+        (n.ishost || !assign_on()) && (any(p -> p[1] == host && p[2] == lport, n.peers) || push!(n.peers, (host, lport)))
     end
     got
 end

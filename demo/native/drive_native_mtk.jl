@@ -103,10 +103,10 @@ end
 const WHEEL_HALF_DEG_R = Ref(JoyCfg.wheel_half_range_deg(JOYNAME; measured = JOYMAP_R[].wheel_half_deg))
 "WARMRACE-1 S2: a warm race takes the launcher's current calibration (the steering gain follows in apply_session_setup!)."
 
-const XBTN = Dict(:map => 0, :aidrive => 0, :replay => 0); const XBTN_PREV = Dict(:map => false, :aidrive => false, :replay => false)
+const XBTN = Dict(:map => 0, :aidrive => 0, :replay => 0, :pause => 0); const XBTN_PREV = Dict(:map => false, :aidrive => false, :replay => false, :pause => false)
 function read_extra_btns!()
     txt = isfile(_JOYCONF) ? read(_JOYCONF, String) : ""
-    for (k, ev) in ((:map, "JM_MAP_BTN"), (:aidrive, "JM_AIDRIVE_BTN"), (:replay, "JM_REPLAY_BTN"))
+    for (k, ev) in ((:map, "JM_MAP_BTN"), (:aidrive, "JM_AIDRIVE_BTN"), (:replay, "JM_REPLAY_BTN"), (:pause, "JM_PAUSE_BTN"))
         m_ = match(Regex("(?m)^" * string(k) * "_btn\\s+(\\d+)"), txt)
         XBTN[k] = something(tryparse(Int, get(ENV, ev, "")), m_ === nothing ? 0 : parse(Int, m_[1]))
     end
@@ -257,6 +257,104 @@ rai_pit_dlat(L, s) = CLASSICAI.dlat(L, s) + (isempty(RAI_PITSHIFT) ? 0.0 : RAI_P
 const AI_ROADSHIFT_CHECK = get(ENV, "JM_AI_ROADSHIFT_CHECK", "1") != "0"
 const AI_PITLINE = get(ENV, "JM_AI_PITLINE", "1") != "0"
 const PIT_IN = Ref(NaN); const PIT_BOX = Ref(NaN); const PIT_END = Ref(NaN)
+
+const PIT_STALLS = Tuple{Float64,Float64}[]
+
+const PIT_STALL_T = Ref{Any}(nothing)
+function read_pit_stalls!(ini)
+    empty!(PIT_STALLS); isfile(ini) || return PIT_STALLS
+    st = Dict{Int,Tuple{Float64,Float64}}(); sec = ""
+    for l in eachline(ini)
+        h = match(r"^\s*\[\s*([A-Za-z0-9_]+)\s*\]", l); h === nothing || (sec = h[1]; continue)
+        startswith(sec, "pit_lane") || continue
+        m = match(r"^\s*stall_(\d+)\s*=\s*([-0-9.]+)\s+([-0-9.]+)", l)
+        m === nothing || haskey(st, parse(Int, m[1])) || (st[parse(Int, m[1])] = (parse(Float64, m[2]), parse(Float64, m[3])))
+    end
+    for k in sort(collect(keys(st))); push!(PIT_STALLS, st[k]); end
+    PITSTALL_STEP[] = pitstall_step(length(PIT_STALLS))
+    PIT_STALLS
+end
+
+const PITSTALL_STEP = Ref(1)
+pitstall_step(nst) = (w = max(something(tryparse(Int, get(ENV, "JM_PITSTALL_STEP", "1")), 1), 1);
+                      N_AI > 1 ? clamp(w, 1, max((nst - 2 - HUMAN_STALLS[]) ÷ (N_AI - 1), 1)) : w)
+
+const HUMAN_STALLS = Ref(1)
+"Classic's stall_k (0-based, as track.ini numbers them) as (dlong, dlat), or nothing (none listed / JM_PITSTALL=0)."
+stall_at(k::Integer) = (PITSTALL_ON && 0 <= k < length(PIT_STALLS)) ? PIT_STALLS[k + 1] : nothing
+"The local player's stall number: 0 off-line, else net_id() - 1 (the host stall_0, guest car 2 stall_1, ...; S4: the host's assignment)."
+my_stall_index() = NETMODE == "" ? 0 : net_id() - 1
+"The local player's stall (dlong, dlat) in Classic's frame, or nothing."
+my_stall() = stall_at(my_stall_index())
+
+const PITSTALL_ON = get(ENV, "JM_PITSTALL", "1") != "0"
+const PITSTALL_EASE = 25.0
+const RAI_STALL_OF = Dict{Int,Int}()
+"""The stall number (k of stall_k) AI car i takes: stall_(HUMAN_STALLS + 1 + (i - 1) x PITSTALL_STEP) -- after the humans' (PITSTALL-2
+(b)) and ONE EMPTY STALL behind them: a human may sit parked in theirs, and 2.6 m behind a parked car (WG) no car can steer out
+(~0.5 m sideways in 2.6 m on full lock; 1.7 m needed -- AI 1 drove into the player in stall_0 at WG and Monza, S2's first test).
+Between AI cars it needs no gap: the car nearest the exit leaves first. Off-line: stall_2, stall_3, ..."""
+rai_stall_k(i) = HUMAN_STALLS[] + 1 + (i - 1)*PITSTALL_STEP[]
+"AI car i's stall (dlong, dlat) in Classic's frame, or nothing."
+rai_stall(i) = 1 <= i ? stall_at(rai_stall_k(i)) : nothing
+
+const PITSTALL_CLEAR = max(something(tryparse(Float64, get(ENV, "JM_PITSTALL_CLEAR", "2.4")), 2.4), 0.0)
+"The stall line's lateral (Classic frame) at station s -- the nearest stall's -- or NaN outside the stall stretch (+-5 m)."
+function stall_line_dlat(s)
+    (PITSTALL_ON && !isempty(PIT_STALLS)) || return NaN
+    lo = Inf; hi = -Inf; best = Inf; sl = NaN
+    for st in PIT_STALLS
+        lo = min(lo, st[1]); hi = max(hi, st[1]); abs(st[1] - s) < best && (best = abs(st[1] - s); sl = st[2])
+    end
+    lo - 5.0 <= s <= hi + 5.0 ? sl : NaN
+end
+"Classic's pit line at station s, held PITSTALL_CLEAR m track-side (toward Classic's dlat 0) of the stall line in the stall stretch."
+function rai_pit_clear_dlat(L, s)
+    d = rai_pit_dlat(L, s); sl = stall_line_dlat(s)
+    (PITSTALL_CLEAR > 0 && isfinite(sl)) || return d
+    dir = sl < 0 ? 1.0 : -1.0
+    dir*(d - sl) >= PITSTALL_CLEAR ? d : sl + dir*PITSTALL_CLEAR
+end
+"""PITSTALL-2: the car's clearance (m; < 0 = inside) at world (x, z, θ) from Classic's walls (classicwall_gaps), the solid objects
+(car_gap) and the hard drawn obstacles (obs_gap) -- for placing a car at rest, once; resets the wall locator's memory before and after (a teleport for it)."""
+function rest_clearance(x, z, θ)
+    g = Inf
+    if CLASSICW_ON && CLASSICWALLS !== nothing
+        classicw_teleported!(); r = classicwall_gaps(x, z, θ); g = min(g, r[4], r[5], r[10]); classicw_teleported!()
+    end
+    for k in eachindex(SOLIDS); g = min(g, car_gap(x, z, θ, k)[1]); end
+    for i in obs_near(x, z)
+        OBS_KIND[i] === :soft || (g = min(g, obs_gap(i, x, z, θ, NaN, NaN)[1]))
+    end
+    g
+end
+"""PITSTALL-2: Classic's stall laterals are not always clear of OUR walls: Monza's stall line (-16.0) overlaps the garage wall, which
+shoved the braked player 1.8 m out into the lane, where the AI pulling out of stall_2 hit it. Each stall that is not 0.2 m clear
+is slid toward the track (Classic's dlat 0) in 0.1 m steps, up to 3 m; the stall keeps its station. Once per load, after the frame."""
+function stalls_clear!(T)
+    (PITSTALL_ON && !isempty(PIT_STALLS) && T !== nothing && get(ENV, "JM_PITSTALL_FIT", "1") != "0") || return 0
+    moved = 0; worst = 0.0; stuck = Int[]
+    for k in eachindex(PIT_STALLS)
+        (sl, dl) = PIT_STALLS[k]; dir = dl < 0 ? 1.0 : -1.0; d = dl; ok = false
+        for _ in 0:30
+            w = CLASSICAI.tworld(T, sl, d); a = CLASSICAI.tworld(T, sl - 1.0, d); b = CLASSICAI.tworld(T, sl + 1.0, d)
+            (ok = rest_clearance(w[1], w[2], atan(b[2] - a[2], b[1] - a[1])) >= 0.2) && break
+            d += 0.1dir
+        end
+        ok || (push!(stuck, k - 1); d = dl)
+        if d != dl
+            moved += 1; worst = max(worst, abs(d - dl)); PIT_STALLS[k] = (sl, round(d, digits = 2))
+        end
+    end
+    println("  [pitstall] stalls clear of the walls: ", moved, " of ", length(PIT_STALLS), " moved toward the track (most ",
+            round(worst, digits = 1), " m; JM_PITSTALL_FIT=0: Classic's as listed)", isempty(stuck) ? "" : string("; NOT clear within 3 m: stall_", join(stuck, ", stall_"))); flush(stdout)
+    moved
+end
+"The lateral (Classic frame) to steer for at pit-line station sg, `rem` m short of the box: the pit line, easing onto car i's stall."
+function rai_pit_target_dlat(L, sg, i, rem)
+    d = rai_pit_dlat(L, sg); stl = rai_stall(i); stl === nothing && return d
+    d + clamp(1.0 - (rem - 3.0)/PITSTALL_EASE, 0.0, 1.0)*(stl[2] - d)
+end
 const PRACTICE_SEC = 60.0 * (tryparse(Float64, get(ENV, "JM_PRACTICE_MIN", "15")) |> x -> x === nothing ? 15.0 : x)
 
 const N_AI      = let rf = get(ENV, "JM_REPLAY", "")
@@ -348,6 +446,7 @@ const RAI_AMAX_STEER = parse(Float64, get(ENV, "JM_RAI_AMAX_STEER", "13.0"))
 const RAI_PROF = Ref{Union{Nothing,Tuple{Vector{Float64},Vector{Float64}}}}(nothing)
 const RAI_PROF_LATE = Ref{Union{Nothing,Tuple{Vector{Float64},Vector{Float64}}}}(nothing)
 const RAI_LATE = parse(Float64, get(ENV, "JM_RAI_LATE", "1.3"))
+const RAI_LANE_V0 = parse(Float64, get(ENV, "JM_RAI_LANE_V0", "45.0"))
 const RAI_LANE_RATE = parse(Float64, get(ENV, "JM_RAI_LANE_RATE", "2.5"))
 const RAI_TLS = Float64[]
 const RAI_ENTRY = get(ENV, "JM_RAI_ENTRY", "1") != "0"
@@ -357,6 +456,54 @@ const RAI_YIELD = get(ENV, "JM_RAI_YIELD", RAI_ENTRY ? "1" : "0") != "0"
 const RAI_WALLV = Tuple{Float64,Float64}[]
 
 rai_talent(name::AbstractString) = (h = foldl((a, c) -> (a*31 + Int(c)) % 1_000_003, collect(name); init = 7); 86.0 + 14.0*(h % 1000)/999)
+
+struct DriverStyle; talent::Float64; aggr::Float64; wet::Float64; cons::Float64; end
+const DRIVER_STYLES = Dict(
+    "J Clark"   => DriverStyle(100.0,  0.00, 0.6, 99.0),
+    "D Gurney"  => DriverStyle( 98.5,  0.20, 1.0, 96.0),
+    "J Stewart" => DriverStyle( 98.0, -0.05, 0.5, 98.5),
+    "C Amon"    => DriverStyle( 97.5, -0.15, 0.9, 98.0),
+    "J Surtees" => DriverStyle( 97.0,  0.15, 0.8, 96.5),
+    "J Brabham" => DriverStyle( 97.0,  0.10, 0.9, 97.5),
+    "G Hill"    => DriverStyle( 95.5,  0.05, 1.0, 97.5),
+    "J Bonnier" => DriverStyle( 91.0, -0.20, 1.1, 97.0))
+const AI_DRIVERSTYLE = get(ENV, "JM_AI_DRIVERSTYLE", "1") != "0"
+
+struct DriverSkill; quick::Float64; exper::Float64; alert::Float64; aggr::Float64; end
+const DRIVER_SKILL = Dict(
+    "J Clark"   => DriverSkill(0.996687, 1.026623, 1.011655, 1.046628),
+    "D Gurney"  => DriverSkill(0.977114, 1.027569, 1.002342, 1.001717),
+    "C Amon"    => DriverSkill(1.026188, 0.995216, 1.010702, 0.990646),
+    "J Brabham" => DriverSkill(0.956994, 1.031787, 0.994390, 0.998780),
+    "J Bonnier" => DriverSkill(0.972326, 1.031888, 1.002107, 1.013717),
+    "J Surtees" => DriverSkill(0.988446, 1.025597, 1.007022, 1.030422),
+    "J Stewart" => DriverSkill(1.009761, 0.997347, 1.003554, 1.010000),
+    "G Hill"    => DriverSkill(0.968490, 1.031582, 1.000036, 1.019390))
+const AI_SKILL = get(ENV, "JM_AI_SKILL", "1") != "0"
+
+const AI_SKILL_K = something(tryparse(Float64, get(ENV, "JM_AI_SKILL_K", "1.25")), 1.25)
+driver_skill(name) = (AI_SKILL && AI_DRIVERSTYLE) ? get(DRIVER_SKILL, String(name), nothing) : nothing
+driver_style(name) = AI_DRIVERSTYLE ? get(DRIVER_STYLES, String(name), nothing) : nothing
+
+const AI_SETUP = get(ENV, "JM_AI_SETUP", "1") != "0"
+const AI_GEARING = let p = joinpath(@__DIR__, "ai_gearing.toml"), d = Dict{String,Dict{String,Float64}}(), sec = ""
+    for l in (isfile(p) ? eachline(p) : String[])
+        m = match(r"^\s*\[\s*([^\]]+?)\s*\]", l); m === nothing || (sec = lowercase(m[1]); d[sec] = Dict{String,Float64}(); continue)
+        m = match(r"^\s*(\w+)\s*=\s*([0-9.]+)", l); (m === nothing || isempty(sec)) || (d[sec][m[1]] = parse(Float64, m[2]))
+    end
+    d
+end
+function ai_gearing!(cars, names)
+    (AI_SETUP && !isempty(cars)) || return nothing
+    tab = get(AI_GEARING, lowercase(CLASSICNAME), nothing)
+    fins = [tab === nothing ? DriveRT3D.FINAL0 : get(tab, String(nm), DriveRT3D.FINAL0) for nm in names]
+    for (c, f) in zip(cars, fins); DriveRT3D.set_cargear!(c, DriveRT3D.GEARS0, f); end
+    println("  [aisetup] gearing: the Lotus's gear set; final ", join(["$(nm) $(f)" for (nm, f) in zip(names, fins)], ", "),
+            tab === nothing ? " (no table for $(CLASSICNAME): the Lotus's own $(DriveRT3D.FINAL0))" : " ($(CLASSICNAME)); the player's session: final $(DriveRT3D.FINAL[])")
+    nothing
+end
+"An AISPECS entry's talent: its driver's, else (no style, or JM_AI_DRIVERSTYLE=0) the chassis hash as before."
+rai_talent_spec(sp) = (d = driver_style(sp[6]); d === nothing ? rai_talent(String(sp[1])) : d.talent)
 const RAI_TALENT = Float64[]
 
 const RAI_SPREAD = get(ENV, "JM_RAI_SPREAD", "1") != "0"
@@ -391,6 +538,8 @@ const RAI_FOLLOW_MARGIN = parse(Float64, get(ENV, "JM_RAI_FOLLOW_MARGIN", "2.0")
 const RAI_DROOP = get(ENV, "JM_RAI_DROOP", "1") != "0"
 const RAI_MISHAP = get(ENV, "JM_RAI_MISHAP", "0") != "0"
 const RAI_AGGR = clamp(parse(Float64, get(ENV, "JM_RAI_AGGRESSION", "0.5")), 0.0, 1.0)
+const RAI_AGGR_CAR = Float64[]
+rai_aggr(i) = i <= length(RAI_AGGR_CAR) ? RAI_AGGR_CAR[i] : RAI_AGGR
 
 const RAI_PASS = get(ENV, "JM_RAI_PASS", "1") != "0"
 const RAI_WILL = parse(Float64, get(ENV, "JM_RAI_WILL", "5.0"))
@@ -416,6 +565,12 @@ const RAI_LIMP_MS = parse(Float64, get(ENV, "JM_RAI_LIMP_MS", "8.0")); const RAI
 const RAI_SERVICE_S = parse(Float64, get(ENV, "JM_RAI_SERVICE_S", "8.0"))
 const RAI_REPAIR = Dict{Int,Tuple{Symbol,Float64}}()
 const RAI_DMGT = Dict{Tuple{Int,Int},Float64}()
+
+practice_runs_on() = get(ENV, "JM_PRACTICE_RUNS", "1") != "0"
+practice_range(k, d) = (f = split(get(ENV, k, d), r"[,/]"); (parse(Float64, f[1]), parse(Float64, f[end])))
+practice_rand(k, d) = ((lo, hi) = practice_range(k, d); lo + (hi - lo)*(AI_RNG[] === nothing ? rand() : rand(AI_RNG[])))
+const RAI_PRUN = Dict{Int,Int}()
+const RAI_PSTOP = Set{Int}()
 const RAI_FOLLOW_REACH = get(ENV, "JM_RAI_FOLLOW_REACH", "1") != "0"
 const RAI_PASS_REACH = get(ENV, "JM_RAI_PASS_REACH", "1") != "0"
 const RAI_SLOWPASS_CAP = get(ENV, "JM_RAI_SLOWPASS_CAP", "1") != "0"
@@ -463,7 +618,7 @@ const RAI_GONE = Set{Int}()
 const RAI_SPINREC = Dict{Int,Tuple{Symbol,Float64,Float64}}()
 const RAI_SPINREC_ON = get(ENV, "JM_RAI_SPINREC", "1") != "0"
 const RAI_SPINREC_IN = deg2rad(parse(Float64, get(ENV, "JM_RAI_SPINREC_DEG", "100"))); const RAI_SPINREC_OUT = deg2rad(35.0)
-rai_nosnap_reset!() = (empty!(RAI_OFFHAT); empty!(RAI_ABS); empty!(RAI_REPAIR); empty!(RAI_DMGT); RAI_DMG_DONE[] = false; empty!(RAI_SPINREC); RAI_SPIN_DONE[] = false; empty!(RAI_CLASSICW); empty!(RAI_WALLT); empty!(RAI_REC); empty!(RAI_PROGT); empty!(RAI_OUT); empty!(RAI_GONE); nothing)
+rai_nosnap_reset!() = (empty!(RAI_OFFHAT); empty!(RAI_ABS); empty!(RAI_REPAIR); empty!(RAI_PRUN); empty!(RAI_PSTOP); empty!(RAI_DMGT); RAI_DMG_DONE[] = false; empty!(RAI_SPINREC); RAI_SPIN_DONE[] = false; empty!(RAI_CLASSICW); empty!(RAI_WALLT); empty!(RAI_REC); empty!(RAI_PROGT); empty!(RAI_OUT); empty!(RAI_GONE); nothing)
 const AI_GRID_LEVEL = get(ENV, "JM_AI_GRID_LEVEL", "0") != "0"
 const RAI_HDIAG = get(ENV, "JM_RAI_HDIAG", "0") != "0"; const RAI_HLAST = Dict{Int,Float64}()
 const RAI_RESEAT = get(ENV, "JM_RAI_RESEAT", "1") != "0"
@@ -735,6 +890,7 @@ function update_world_velocity!(cs, x, z, dt)
     PRVX[] = x; PRVZ[] = z
     (WVX[], WVZ[])
 end
+const RAILCLASSIC_PLAYER = get(ENV, "JM_RAILCLASSIC_PLAYER", "1") != "0"
 function solid_contact(x, z, θ, v, dt)
     Fx = 0.0; Fy = 0.0; Mz = 0.0; peak = 0.0
     hardpk = 0.0
@@ -743,6 +899,13 @@ function solid_contact(x, z, θ, v, dt)
         kind = SOLIDS[k][4]
         (gap, nx, nz) = car_gap(x, z, θ, k)
         gap >= 0.0 && continue
+
+        if RAILCLASSIC_PLAYER && CLASSICW_ON && RAILK_LO <= k <= RAILK_HI
+            a_ = classicw_locate_any(x, z); b_ = classicw_locate_any(SOLIDS[k][1], SOLIDS[k][2])
+            if a_ !== nothing && b_ !== nothing
+                sg_ = a_[3] >= b_[3] ? 1.0 : -1.0; nx = sg_*a_[4]; nz = sg_*a_[5]
+            end
+        end
         vn = WVX[]*nx + WVZ[]*nz
 
         (fx, fy, mz) = DriveRT3D.contact_force(-gap, nx, nz, vn, θ; kind = kind, dt = dt)
@@ -1114,12 +1277,40 @@ function apply_session_setup!()
 end
 apply_session_setup!()
 
+function with_ai_base_setup(f)
+    r = _with_ai_base_setup(f)
+    (r isa AbstractVector && !isempty(r)) && (println("  [aisetup] AI 1's front spring ", round(Int, DriveRT3D.carparam(r[1], "sFL₊ks")),
+                                                      " N/m (yours ", round(Int, DriveRT3D.KS[][1]), ")"); flush(stdout))
+    r
+end
+function _with_ai_base_setup(f)
+    g = get(ENV, "JM_GARAGE", "")
+    mine = (!isempty(g) && isfile(g)) || !SetupTab.is_default(SETUP)
+    (get(ENV, "JM_AI_BASESETUP", "1") != "0" && mine) || return f()
+    snap = DriveRT3D.setup_snapshot()
+    keep = (GARAGE_NOTE[], GARAGE_PP[], FUEL_SETUP_L[], STEER_RATIO[], STEER_GAIN[], STEER_LIM[])
+    ks_me = DriveRT3D.KS[]
+    try
+        redirect_stdout(devnull) do
+            withenv(() -> apply_session_setup!(), "JM_GARAGE" => nothing)
+        end
+        println("  [aisetup] the AI's base setup: the session's default (springs ", join((round(Int, k) for k in DriveRT3D.KS[]), "/"),
+                " N/m), not yours (", join((round(Int, k) for k in ks_me), "/"), ")"); flush(stdout)
+        return f()
+    finally
+        DriveRT3D.setup_restore!(snap)
+        GARAGE_NOTE[], GARAGE_PP[], FUEL_SETUP_L[], STEER_RATIO[], STEER_GAIN[], STEER_LIM[] = keep
+    end
+end
+
 const NETMODE  = lowercase(get(ENV, "JM_NET", ""))
 const NET_HOST = get(ENV, "JM_NET_HOST", "127.0.0.1")
 const NET_PORT = parse(Int, get(ENV, "JM_NET_PORT", "47700"))
 const NET_ID   = parse(Int, get(ENV, "JM_NET_ID", NETMODE == "host" ? "1" : "2"))
-const NET_HZ   = parse(Float64, get(ENV, "JM_NET_HZ", "10"))
+const NET_HZ   = parse(Float64, get(ENV, "JM_NET_HZ", "20"))
 const NET_DIAG = parse(Int, get(ENV, "JM_NET_DIAG", "0"))
+
+NETMODE == "" || (HUMAN_STALLS[] = max(NET_ID, something(tryparse(Int, get(ENV, "JM_NET_STALLS", NETMODE == "host" ? "2" : "1")), 1)))
 
 const FIXED_DT    = parse(Float64, get(ENV, "JM_FIXED_DT", "0"))
 const WHEELOFF_RULE = get(ENV, "JM_WHEELOFF_RULE", "1") != "0"
@@ -1256,6 +1447,7 @@ const AUTODRIVE_LAT = parse(Float64, get(ENV, "JM_AUTODRIVE_LAT", "0"))
 const AUTODRIVE_ROAD = get(ENV, "JM_AUTODRIVE_ROAD", "1") != "0"
 const AD_OFF = Ref{Union{Nothing,Tuple{Float64,Vector{Float64}}}}(nothing)
 const ADLINE = Ref{Any}(nothing)
+const CLINE_CACHE = Ref{Union{Nothing,RaceAI.AILine}}(nothing)
 
 const AUTODRIVE_RECOVER = parse(Float64, get(ENV, "JM_AUTODRIVE_RECOVER", "0"))
 const AD_SLOW_T = Ref(0.0)
@@ -1264,6 +1456,27 @@ const AUTODRIVE_TRAFFIC = get(ENV, "JM_AUTODRIVE_TRAFFIC", "0") != "0"
 const AD_TRAFFIC = Ref(NTuple{3,Float64}[])
 
 const ADRIVE_ON = Ref(false); const ADRIVE_AT = Ref(-1.0); const ADRIVE_PK = Ref(false); const ADRIVE_BTN_HIT = Ref(false)
+
+const PAUSE_HIT = Ref(false); const PAUSE_PK = Ref(false); const PAUSE_REQ = Ref(false); const PAUSE_AT_DONE = Ref(false); const PAUSE_T1 = Ref(-1.0)
+const PAUSE_AT = (f_ = split(get(ENV, "JM_PAUSE_AT", "0:0"), ':'); (parse(Float64, f_[1]), parse(Float64, f_[end])))
+"""PAUSE-1: hold the session (see PAUSE_HIT) until Pause or the pause button is pressed again (or the window closes)."""
+function pause_wait!(ffb)
+    m0 = ENG.master[]; ENG.master[] = 0.0
+    ffb !== nothing && FFB.set_force!(ffb, 0.0)
+    println("  [pause] paused"); flush(stdout)
+    t0 = time(); pk = true; XBTN_PREV[:pause] = true
+    while !GLFW.WindowShouldClose(win)
+        GLFW.PollEvents()
+        kp = GLFW.GetKey(win, GLFW.KEY_PAUSE) == GLFW.PRESS
+        bs = try GLFW.GetJoystickButtons(GLFW.JOYSTICK_1) catch; nothing end
+        hit = (kp && !pk) | xbtn_pressed!(:pause, bs); pk = kp
+        (hit || (PAUSE_AT[2] > 0 && time() - t0 >= PAUSE_AT[2])) && break
+        sleep(1/60)
+    end
+    ENG.master[] = m0; gearbox_notice!("", 0.0)
+    println("  [pause] resumed after ", round(time() - t0, digits = 1), " s"); flush(stdout)
+    nothing
+end
 const ADRIVE_PACE = parse(Float64, get(ENV, "JM_AIDRIVE_PACE", "0.75"))
 const AUTODRIVE_PROF_PACE = parse(Float64, get(ENV, "JM_AUTODRIVE_PROFILE", "0"))
 const AUTODRIVE_PROF = Ref{Any}(nothing)
@@ -1303,6 +1516,7 @@ const NET_COLLIDE = get(ENV, "JM_NET_COLLIDE", "1") != "0"
 const NET_ERR  = get(ENV, "JM_NET_ERR", "0") != "0"
 const NET_PREV = Ref(Dict{UInt8,NamedTuple}())
 const NET_ERRS = Float64[]
+const NET_ERRS0 = Float64[]
 const NET_DTS  = Float64[]
 
 include(joinpath(@__DIR__,"netplay.jl")); using .NetPlay
@@ -1328,10 +1542,20 @@ const NETLINK = if NETMODE == "host"
             end
         end
         println("  net:     JOINING ", jhost, ":", jport, " as car ", NET_ID); flush(stdout)
-        NetPlay.netopen(port = jport + NET_ID, peer = (jhost, jport))
+
+        let l = nothing
+            for k in 0:15
+                l = try; NetPlay.netopen(port = jport + NET_ID + k, peer = (jhost, jport)); catch; nothing; end
+                l === nothing || (k > 0 && println("  net:     listen port ", jport + NET_ID, " in use -- ", jport + NET_ID + k); break)
+            end
+            l === nothing && error("netplay: no free listen port from $(jport + NET_ID)")
+            l
+        end
     else
         nothing
     end
+"PITSTALL-2 S4: this car's net id -- the host 1; a guest the id the host assigned it (join order), until then JM_NET_ID (2)."
+net_id() = NETLINK === nothing ? NET_ID : NETLINK.ishost ? NET_ID : NetPlay.myid(NETLINK, NET_ID)
 
 include(joinpath(@__DIR__,"setup_tab.jl")); using .SetupTab
 const SETUP = SetupTab.session_setup(DriveRT3D.KS[], DriveRT3D.RIDE_H[],
@@ -4461,7 +4685,7 @@ oil_bar(rpm) = (r = clamp(Float64(rpm), 0.0, 19999.0); i = findlast(k -> OILP_RP
 const FUEL_BAR = 3.79
 function dials_update!(rpm)
     t = time(); dt = DIALV.tw == 0.0 ? 0.0 : clamp(t - DIALV.tw, 0.0, 0.1); DIALV.tw = t
-    run = rpm > 200; load = clamp(rpm / 9000, 0.0, 1.0)
+    run = rpm > 200; load = clamp(rpm / (9000*DriveRT3D.CAR[].kR), 0.0, 1.0)
     if DIALS_CLASSIC
         DIALV.oilpsi  = run ? 79.0 * clamp(rpm / 1500, 0.0, 1.0) : 0.0
         DIALV.fuelpsi = run ? 79.0 * clamp(rpm / 1500, 0.0, 1.0) : 0.0
@@ -5335,7 +5559,7 @@ const TRAIL_HZ   = 10.0
 const TRACE_DS  = haskey(ENV, "JM_TRACE_DS")
 const DS_RATIO  = Vector{Float64}()
 const DS_RAW    = Vector{Float64}()
-const DS_PREV   = Ref(-1.0)
+const AD_SPREV   = Ref(-1.0)
 function ds_note!(ds, v, dt, total)
     ds > total/2  && (ds -= total)
     ds < -total/2 && (ds += total)
@@ -5722,6 +5946,30 @@ GLFW.SetKeyCallback(win, (w, k, sc, act, mods) -> (if act == GLFW.PRESS && (k ==
                                                    end; nothing))
 took_key!(k) = (n = get(KEY_LATCH, k, 0); n > 0 && (KEY_LATCH[k] = 0); n > 0)
 const IPRESS_SEEN = Ref(false)
+
+const REPLAYCUE = get(ENV, "JM_REPLAYCUE", "1") != "0"
+function instant_loading_frame!(eng)
+    REPLAYCUE || return nothing
+    try
+        EngineAudio.stop!(eng)
+        GLFW.SetWindowTitle(win, "Julia Racer — REPLAY (loading…)")
+        (fw, fh) = GLFW.GetFramebufferSize(win)
+        glBindFramebuffer(GL_FRAMEBUFFER, 0); glViewport(0, 0, fw, fh)
+        glClearColor(0.0f0, 0.0f0, 0.0f0, 1.0f0); glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        if FONT !== nothing
+            tv = Float32[]; s1 = 4.0*fh/1080; s2 = 1.6*fh/1080
+            t1 = "REPLAY"; t2 = "loading the replay of this session ..."
+            Render.text!(tv, FONT, (fw - Render.text_width(FONT, t1; scale = s1))/2, 0.42fh, t1, (1.0, 0.85, 0.2); scale = s1)
+            Render.text!(tv, FONT, (fw - Render.text_width(FONT, t2; scale = s2))/2, 0.42fh + 70.0*fh/1080, t2, (0.85, 0.85, 0.85); scale = s2)
+            Render.text_draw(textprog, textvao, textvbo, FONT, tv, fw, fh)
+        end
+        GLFW.SwapBuffers(win); GLFW.PollEvents()
+        println("  [instant] REPLAY title shown, sound off"); flush(stdout)
+    catch e
+        println("  [instant] REPLAY title not drawn: ", sprint(showerror, e)); flush(stdout)
+    end
+    nothing
+end
 const HUD_UNDER_BAND = get(ENV, "JM_HUD_UNDER_BAND", "0") == "1"
 const STOP_T = Ref(-1.0)
 glEnable(GL_DEPTH_TEST); glEnable(GL_MULTISAMPLE)
@@ -5799,7 +6047,8 @@ const GRADE_TAB = Dict("OVERCAST"=>GRADE_OVERCAST, "NURB"=>GRADE_NURB, "MONZA"=>
 const GRADE0 = SKIDPAD ? GRADE_SKIDPAD :
               haskey(ENV, "JM_GRADE") ? get(GRADE_TAB, uppercase(ENV["JM_GRADE"]), GRADE_OVERCAST) :
               get(GRADE_BYTRACK, TRACKSEL, GRADE_OVERCAST)
-const ENG = EngineAudio.build_lotus()
+const ENG = EngineAudio.build_lotus(classic_engine = EngineAudio.engine_wav(get(ENV, "JM_PLAYER_CAR", "lotus")))
+println("  engine sound: ", basename(EngineAudio.engine_wav(get(ENV, "JM_PLAYER_CAR", "lotus"))))
 
 if !haskey(ENV,"JM_EXPOSURE")
 
@@ -6297,6 +6546,9 @@ const OBJVEG = Dict{String,Vector{Bool}}()
 const BACKDROP_ON = NURB && get(ENV, "JM_BACKDROP", "1") != "0"
 const BACKDROP_R_TIERG  = parse(Float32, get(ENV, "JM_BACKDROP_R_TIERG",  "500"))
 const BACKDROP_R_CASTLE = parse(Float32, get(ENV, "JM_BACKDROP_R_CASTLE", "1200"))
+
+const BACKDROP_CULL = parse(Int, get(ENV, "JM_BACKDROP_CULL", "1"))
+const BD_CFM = Ref{GLint}(0)
 isbackdrop(nm) = BACKDROP_ON && (startswith(nm, "tierg") || startswith(nm, "inhcas"))
 backdrop_r(nm) = startswith(nm, "tierg") ? BACKDROP_R_TIERG : BACKDROP_R_CASTLE
 const OBJBACKDROP = Dict{String,Vector{Bool}}()
@@ -7851,8 +8103,20 @@ let objnames=Set{String}()
         (lo, hi) = classicw_road_interval(r[1], r[2])
         isfinite(lo) && isfinite(hi) && (r[3] < lo - 1.0 || r[3] > hi + 1.0)
     end
+
+    _bbat = let v = get(ENV, "JM_BBDIAG_AT", ""); isempty(v) ? nothing : (f = split(v, ":"); (parse(Float64, f[1]), length(f) > 1 ? parse(Float64, f[2]) : 100.0)) end
     for i in insts
         bb = get(bbinfo, i.name, nothing); bb === nothing && continue
+        if _bbat !== nothing
+            _hr = JRTrack.hat(TRKSURF, Float64(i.x), Float64(i.y))
+            if _hr.found && abs(rem(_hr.lapdist - _bbat[1], TRKSURF.lap_length, RoundNearest)) <= _bbat[2]
+                _hw = NURB ? RING_BB_HALFW_OBJ : ROAD_HALFW
+                _v = dropi(i) ? "drop()" : !onground(i) ? "not on the ground" : (NURB && lowercase(String(i.name)) == "fake") ? "the invisible fake" :
+                     (on_road(i.x, i.y, _hw) && !classic_offroad(i.x, i.y)) ? string("on the road (within ", _hw, " m)") : "passes these rules"
+                println("  JM_BBDIAG_AT s=", round(Int, _hr.lapdist), " lat ", round(_hr.lateral, digits = 1), " ", rpad(String(i.name), 10),
+                        " h ", round(bb[4], digits = 1), " m w ", round(bb[5], digits = 1), " m at (", round(i.x, digits = 1), ", ", round(i.y, digits = 1), "): ", _v)
+            end
+        end
         dropi(i) && (_bbwhy && println("  JM_BBDIAG ", i.name, ": drop()"); true) && continue
         person_unsafe(i) && continue
 
@@ -8405,12 +8669,17 @@ function obs_build_part!(p, M, oname, ground, softname, bump)
         end
     end
 
+const UNSINK_TREES = get(ENV, "JM_UNSINK_TREES", NURB ? "1" : "0") != "0"
+const UNSINK_MIN = parse(Float64, get(ENV, "JM_UNSINK_MIN", "2.0"))
 if !SKIDPAD && get(ENV, "JM_GROUND_TREES", "1") != "0"
-    let nb = 0, nt = 0, no = 0
+    let nb = 0, nt = 0, no = 0, nsunk = 0
         gnd(x, z) = (h = JRTrack.hat3d(TERRAIN, x, z; ref = Inf); h[3] ? Float64(h[1]) : NaN)
         for i in eachindex(BILLBOARDS)
             b = BILLBOARDS[i]; g = gnd(Float64(b[2][1]), -Float64(b[2][3])); isnan(g) && continue
             lift = Float64(b[2][2]) - g
+            if UNSINK_TREES && -30.0 < lift < -UNSINK_MIN
+                BILLBOARDS[i] = (b[1], (b[2][1], Float32(g), b[2][3]), b[3], b[4]); nsunk += 1; continue
+            end
             (0.5 < lift < 30.0) || continue
             BILLBOARDS[i] = (b[1], (b[2][1], Float32(g), b[2][3]), b[3], b[4]); nb += 1
         end
@@ -8437,6 +8706,7 @@ if !SKIDPAD && get(ENV, "JM_GROUND_TREES", "1") != "0"
             OBJECTS[i] = (o[1], M2, o[3], (o[4][1], o[4][2] - Float32(lo), o[4][3]), o[5]); no += 1
         end
         println("  FLOAT-1: set down onto the ground: ", nb, " billboards, ", nt, " forest panels, ", no, " foliage objects (JM_GROUND_TREES=0 disables)")
+        UNSINK_TREES && println("  [unsink] ", nsunk, " sprite(s) authored ", UNSINK_MIN, "-30 m under the ground stood on it (JM_UNSINK_TREES=0 = as authored)")
     end
 end
 
@@ -9320,7 +9590,64 @@ function split_fists(parts, tex)
             append!(zm > 0 ? L : R, @view v[t:t+32])
         end
     end
+    GLOVE_CAP && (glove_cap!(L); glove_cap!(R))
     [Render.Item(Render.upload(a)..., tex, (1f0,1f0,1f0)) for a in (L, R)]
+end
+
+const GLOVE_CAP = get(ENV, "JM_GLOVE_CAP", "1") != "0"
+function glove_cap!(v::Vector{Float32})
+    n = length(v) ÷ 33; n == 0 && return v
+    key(i) = (round(Int, v[i]*1000), round(Int, v[i+1]*1000), round(Int, v[i+2]*1000))
+    ids = Dict{NTuple{3,Int},Int}(); pos = NTuple{3,Float32}[]
+    vid(i) = get!(ids, key(i)) do; push!(pos, (v[i], v[i+1], v[i+2])); length(pos) end
+    tri = [ntuple(k -> vid(33(t-1) + 11(k-1) + 1), 3) for t in 1:n]
+    cnt = Dict{Tuple{Int,Int},Int}()
+    for (a, b, c) in tri, (p, q) in ((a, b), (b, c), (c, a))
+        p == q && continue; e = minmax(p, q); cnt[e] = get(cnt, e, 0) + 1
+    end
+    bnd = [e for (e, k) in cnt if k == 1]; isempty(bnd) && return v
+
+    area(t) = (o = 33(t-1); ux = v[o+12]-v[o+1]; uy = v[o+13]-v[o+2]; uz = v[o+14]-v[o+3]; wx = v[o+23]-v[o+1]; wy = v[o+24]-v[o+2]; wz = v[o+25]-v[o+3];
+               hypot(uy*wz-uz*wy, uz*wx-ux*wz, ux*wy-uy*wx))
+    tb = argmax(area.(1:n)); ob = 33(tb-1)
+    uv = ((v[ob+10]+v[ob+21]+v[ob+32])/3, (v[ob+11]+v[ob+22]+v[ob+33])/3); col = (v[ob+7], v[ob+8], v[ob+9])
+    hc = ntuple(k -> sum(p[k] for p in pos)/length(pos), 3)
+
+    wcx = (v[ob+13]-v[ob+2])*(v[ob+25]-v[ob+3]) - (v[ob+14]-v[ob+3])*(v[ob+24]-v[ob+2])
+    wcy = (v[ob+14]-v[ob+3])*(v[ob+23]-v[ob+1]) - (v[ob+12]-v[ob+1])*(v[ob+25]-v[ob+3])
+    wcz = (v[ob+12]-v[ob+1])*(v[ob+24]-v[ob+2]) - (v[ob+13]-v[ob+2])*(v[ob+23]-v[ob+1])
+    rhr = wcx*v[ob+4] + wcy*v[ob+5] + wcz*v[ob+6] >= 0
+    adj = Dict{Int,Vector{Int}}()
+    for (p, q) in bnd; push!(get!(adj, p, Int[]), q); push!(get!(adj, q, Int[]), p); end
+    used = Set{Tuple{Int,Int}}(); ncap = 0
+    for (p0, q0) in bnd
+        minmax(p0, q0) in used && continue
+        loop = [p0]; prev = p0; cur = q0; push!(used, minmax(p0, q0))
+        while cur != p0 && length(loop) < 64
+            push!(loop, cur)
+            nxt = findfirst(w -> w != prev && !(minmax(cur, w) in used), adj[cur]); nxt === nothing && break
+            w = adj[cur][nxt]; push!(used, minmax(cur, w)); prev = cur; cur = w
+        end
+        (cur == p0 && length(loop) >= 3) || continue
+        c = ntuple(k -> sum(pos[i][k] for i in loop)/length(loop), 3)
+        nx = 0f0; ny = 0f0; nz = 0f0
+        for j in eachindex(loop)
+            a_ = pos[loop[j]]; b_ = pos[loop[mod1(j+1, length(loop))]]
+            nx += (a_[2]-b_[2])*(a_[3]+b_[3]); ny += (a_[3]-b_[3])*(a_[1]+b_[1]); nz += (a_[1]-b_[1])*(a_[2]+b_[2])
+        end
+        nl = sqrt(nx^2 + ny^2 + nz^2); nl < 1f-9 && continue
+        nx /= nl; ny /= nl; nz /= nl
+        out = nx*(c[1]-hc[1]) + ny*(c[2]-hc[2]) + nz*(c[3]-hc[3]) >= 0
+        out || (reverse!(loop); nx = -nx; ny = -ny; nz = -nz)
+        rhr || reverse!(loop)
+        for j in eachindex(loop)
+            a_ = pos[loop[j]]; b_ = pos[loop[mod1(j+1, length(loop))]]
+            for q in (c, a_, b_); append!(v, Float32[q[1], q[2], q[3], nx, ny, nz, col[1], col[2], col[3], uv[1], uv[2]]); end
+        end
+        ncap += 1
+    end
+    println("  [glovecap] ", ncap, " open end(s) capped (", length(bnd), " boundary edges; JM_GLOVE_CAP=0 = open)")
+    v
 end
 handLR = isempty(handItems) ? Render.Item[] : split_fists(HANDP, handItems[1].tex)
 const HAND_GRIP = deg2rad(parse(Float32, get(ENV,"JM_HAND_GRIP","30")))
@@ -9561,13 +9888,18 @@ NETLINK === nothing || (NETLINK.car = car_type(PLAYER_CAR); NETLINK.carname = PL
 const NET_CARSWITCH = Ref("")
 const NET_SWITCHED = Ref(false)
 const NET_NOTE = Ref(("", -Inf))
-"""A guest on the host's car takes the first free one: its name, or "" if the host's car is unknown or not ours."""
+"""A guest on a car taken by a racer before it (the host, or a guest with a lower id -- join order, PITSTALL-2 S4) takes the first
+free one: its name, or "" if ours is free (or the others' cars unknown)."""
 function net_free_car()
-    hc = NETLINK.remote[0x01].car
-    (hc != 0xff && hc == NETLINK.car && Int(hc) < length(ALL67)) || return ""
-    i = findfirst(k -> k - 1 != Int(hc), eachindex(ALL67))
+    me = net_id(); taken = Dict{Int,Int}()
+    for (id, p) in NETLINK.remote
+        (id < me && id < NetPlay.AI_ID0 && p.car != 0xff && Int(p.car) < length(ALL67)) && (taken[Int(p.car)] = Int(id))
+    end
+    (NETLINK.car != 0xff && haskey(taken, Int(NETLINK.car))) || return ""
+    hc = NETLINK.car; who = taken[Int(hc)]
+    i = findfirst(k -> !haskey(taken, k - 1), eachindex(ALL67)); i === nothing && return ""
     NETLINK.car = UInt8(i - 1); NETLINK.carname = ALL67[i][1]; NET_CARSWITCH[] = ALL67[i][1]
-    NET_NOTE[] = (string("The host drives the ", ALL67[Int(hc) + 1][1], ": you drive the ", ALL67[i][1], "."), time())
+    NET_NOTE[] = (string(who == 1 ? "The host" : "Car $who", " drives the ", ALL67[Int(hc) + 1][1], ": you drive the ", ALL67[i][1], "."), time())
     println("  netplay: ", NET_NOTE[][1]); flush(stdout)
     ALL67[i][1]
 end
@@ -9576,7 +9908,13 @@ function net_early_car(mine)
     (NETMODE == "join" && NETLINK !== nothing) || return mine
     tmax = parse(Float64, get(ENV, "JM_NET_CARWAIT", "20")); t0 = time(); tk = -Inf
     while time() - t0 < tmax && !haskey(NETLINK.remote, 0x01) && isempty(NETLINK.refused)
-        time() - tk >= 0.5 && (tk = time(); NetPlay.send_pose!(NETLINK, NET_ID, NetPlay.KNOCK_TICK, 0, 0, 0, 0; car = NETLINK.car))
+        time() - tk >= 0.5 && (tk = time(); NetPlay.send_pose!(NETLINK, net_id(), NetPlay.KNOCK_TICK, 0, 0, 0, 0; car = NETLINK.car))
+        NetPlay.poll!(NETLINK); sleep(0.05)
+    end
+
+    t1 = time()
+    while haskey(NETLINK.remote, 0x01) && time() - t1 < 1.0 && (NETLINK.myid == 0 || time() - t1 < 0.6)
+        time() - tk >= 0.5 && (tk = time(); NetPlay.send_pose!(NETLINK, net_id(), NetPlay.KNOCK_TICK, 0, 0, 0, 0; car = NETLINK.car))
         NetPlay.poll!(NETLINK); sleep(0.05)
     end
     if !haskey(NETLINK.remote, 0x01)
@@ -9803,6 +10141,9 @@ const JOYTRACE_T = Ref(-1.0)
 const CLUTCH_GATE = Ref(-1.0)
 
 const START_AUTO = CTL.auto
+const STALL_HOLD = Ref(false)
+
+const STALL_PIN = Ref((NaN, NaN, NaN))
 const GEAR_MSG = Ref(0.0)
 const STALL_AT = parse(Float64, get(ENV, "JM_STALL_AT", "-1"))
 const STALL_AT_DONE = Ref(false)
@@ -9843,6 +10184,7 @@ function read_input()
         end
         xbtn_pressed!(:map, bs) && map_zoom_cycle!()
         xbtn_pressed!(:aidrive, bs) && (ADRIVE_BTN_HIT[] = true)
+        xbtn_pressed!(:pause, bs) && (PAUSE_HIT[] = true)
         STEER_GAIN[] > 0 && (str = JoyCfg.steer_physical(JOYMAP_R[], js, STEER_GAIN[]; lim = STEER_LIM[]))
     end
 
@@ -9850,6 +10192,11 @@ function read_input()
     key(GLFW.KEY_A) && (str=1.0); key(GLFW.KEY_D) && (str=-1.0)
     SMOKE && haskey(ENV, "JM_TEST_STEER") && (str = parse(Float64, ENV["JM_TEST_STEER"]))
     SMOKE && haskey(ENV, "JM_TEST_BRAKE") && (brk = parse(Float64, ENV["JM_TEST_BRAKE"]))
+
+    if STALL_HOLD[]
+        (thr >= 0.05 && (CTL.auto || GEAR_NOW[] != 0)) ? (STALL_HOLD[] = false; println("  [pitstall] you leave your stall"); flush(stdout)) :
+                                                         (brk = max(brk, 1.0))
+    end
     SMOKE && haskey(ENV, "JM_TEST_CLUTCH") && (clu = parse(Float64, ENV["JM_TEST_CLUTCH"]))
     key(GLFW.KEY_C) && (clu=1.0)
     ku=key(GLFW.KEY_E); kd=key(GLFW.KEY_Q)
@@ -9858,8 +10205,8 @@ function read_input()
 
     CLU_HIST[] = clu >= 0.25 ? time() : CLU_HIST[]
     if get(ENV,"JM_CLUTCH_REQ","1") != "0" && !CTL.auto && (upE || dnE)
-        g2 = clamp(GEAR_NOW[] + (upE ? 1 : -1), 1, length(DriveRT3D.GEARS))
-        tgt = GEAR_NOW[] >= 1 ? abs(V_NOW[]) / DriveRT3D.RW_R * DriveRT3D.GEARS[g2] * DriveRT3D.final_eff() * 60/(2π) : 0.0
+        g2 = clamp(GEAR_NOW[] + (upE ? 1 : -1), 1, DriveRT3D.ngears())
+        tgt = GEAR_NOW[] >= 1 ? abs(V_NOW[]) / DriveRT3D.RW_R * DriveRT3D.gearratio(g2) * DriveRT3D.final_eff() * 60/(2π) : 0.0
         JoyCfg.shift_ok(clu, time() - CLU_HIST[], RPM_NOW[], tgt) || (upE = false; dnE = false)
     end
     kv = key(GLFW.KEY_V); (kv && !CTL.prevV) && (CTL.view = 1-CTL.view); CTL.prevV = kv
@@ -10622,6 +10969,14 @@ function main()
 
     groundz_ai(x, y) = (r = ground_road(x, y); r[2] ? Float32(r[1] + kerb_bump(x, y) + road_rough(x, y)) : Float32(objground_at(x, y)))
 
+    for spec in filter(!isempty, split(get(ENV, "JM_AIGROUND_PROBE", ""), ";"))
+        let (px, pz) = parse.(Float64, split(spec, ":")), r = ground_road(px, pz)
+            println("  [aiground] (", px, ", ", pz, "): player groundz ", round(groundz(px, pz; hold = false), digits = 3), "  AI groundz_ai ",
+                    round(groundz_ai(px, pz), digits = 3), "  road ", r[2] ? round(r[1], digits = 3) : "- (off the road)", "  object ground ",
+                    round(objground_at(px, pz), digits = 3)); flush(stdout)
+        end
+    end
+
     if get(ENV, "JM_GZBENCH", "0") != "0" && !SKIDPAD
         let pts = [(TRKSURF.pos[k][1] + 2.0*TRKSURF.perp[k][1], TRKSURF.pos[k][3] + 2.0*TRKSURF.perp[k][3]) for k in 1:7:length(TRKSURF.pos)]
             acc = 0.0
@@ -10706,6 +11061,8 @@ function main()
         DriveRT3D.set_corner_weights!(cw; source = "setup + fuel $(round(FUEL_START_L[], digits = 1)) L ($FUEL_MODE)")
         println("  fuel:    ", round(FUEL_START_L[], digits = 1), " L (", FUEL_MODE, ")  -> mass ", round(DriveRT3D.MASS[], digits = 1),
                 " kg, front ", round(100DriveRT3D.FRONT_FRAC[], digits = 1), " %   (setup ibt ", FUEL_SETUP_L[], " L)")
+
+        FUEL_SETUP_L[] = FUEL_START_L[]
     end
     tstamp("physics build (mtkcompile) begins")
 
@@ -10726,8 +11083,10 @@ function main()
         flush(stdout)
     end
 
-    CLINE  = !SKIDPAD ? RaceAI.build_line(CLASSICTrack.defold(ALIGNED; label = "AI rail"),
-                                          (x, z) -> (r = ground_road(x, z); r[2] ? r[1] : NaN)) : nothing
+    CLINE  = SKIDPAD ? nothing : (CLINE_CACHE[] !== nothing && get(ENV, "JM_CLINE_CACHE", "1") != "0") ?
+             (println("  [REPLAYCUE] CLINE reused (built once this process)"); CLINE_CACHE[]) :
+             (CLINE_CACHE[] = RaceAI.build_line(CLASSICTrack.dejog(CLASSICTrack.defold(ALIGNED; label = "AI rail"); label = "AI rail"),
+                                                (x, z) -> (r = ground_road(x, z); r[2] ? r[1] : NaN)))
     HUD_MAP_ON && CLINE !== nothing && trackmap_build!(TRACKMAP, CLINE.x, CLINE.z, CLINE.s, CLINE.total)
 
     if _DX_GROUNDPROF && CLINE !== nothing
@@ -10774,9 +11133,12 @@ function main()
         exit(0)
     end
     CLINE !== nothing && println("  CLINE: centreline length = ", round(Int, CLINE.total), " m  (", TRACKSEL, ")")
+    tstamp("  [REPLAYCUE] CLINE built; autodriver road line next")
     if AUTODRIVE && AUTODRIVE_ROAD && CLASSICW_ON && CLINE !== nothing
-        AD_OFF[] = autodrive_offsets(CLINE)
-        ADLINE[] = autodrive_line(CLINE, AD_OFF[], (x, z) -> (r = ground_road(x, z); r[2] ? r[1] : NaN))
+        if ADLINE[] === nothing || get(ENV, "JM_CLINE_CACHE", "1") == "0"
+            AD_OFF[] = autodrive_offsets(CLINE)
+            ADLINE[] = autodrive_line(CLINE, AD_OFF[], (x, z) -> (r = ground_road(x, z); r[2] ? r[1] : NaN))
+        end
         let o = AD_OFF[][2], st = AD_OFF[][1], m = findall(x -> abs(x) > 0.1, o)
             println("  [autodrive] line kept on Classic's road: ", round(Int, st*length(m)), " m shifted",
                     isempty(m) ? "" : string(", max ", round(maximum(abs.(o)), digits = 2), " m at s ", round(Int, st*(argmax(abs.(o)) - 1))),
@@ -11018,6 +11380,7 @@ function main()
     _DX_ROADEDGE && dx_roadedge()
 
     _DX_OBJCENSUS && dx_objcensus()
+    tstamp("  [REPLAYCUE] CLINE + autodriver line done")
     AILINE = (CLINE !== nothing && N_AI > 0) ? CLINE : nothing
 
     if AILINE !== nothing && get(ENV, "JM_AI_KAPPA_DEJOG", "0") != "0"
@@ -11035,6 +11398,7 @@ function main()
         end
     end
 
+    tstamp("  [REPLAYCUE] AILINE set; Classic race line next")
     if AILINE !== nothing && get(ENV, "JM_AI_CLASSICLINE", "1") != "0"
 
         if MONZA || ZANDV || get(ENV, "JM_AI_CLASSICLINE_ALL", "1") != "0"
@@ -11511,6 +11875,7 @@ function main()
         end
     end
 
+    tstamp("  [REPLAYCUE] Classic race line block done")
     if _DX_LINE_Y && AILINE !== nothing
         n = length(AILINE.x); diffs = Float64[]
         for k in 1:max(1, n ÷ 200):n
@@ -11528,6 +11893,8 @@ function main()
 
     if !isempty(AICARS)
         pw = [AICAR_PHYS[i][1]/AICAR_PHYS[i][2] for i in 1:length(AICARS)]
+
+        (AI_PHYSICS && RAI_SPREAD && DriveRT3D.ai_carphys_on()) && fill!(pw, 1.0)
         pwmax = maximum(pw)
 
         _temper = clamp(something(tryparse(Float64, get(ENV, "JM_AI_TEMPER", "0.35")), 0.35), 0.0, 1.0)
@@ -11538,14 +11905,32 @@ function main()
             println("  [aipace] chassis gold: ", join(["$(AISPECS[mod1(i, length(AISPECS))][1]) $(round(c.pace, digits = 4))" for (i, c) in enumerate(AICARS)], ", "))
         end
 
+        let sk = [driver_skill(AISPECS[mod1(i, length(AISPECS))][6]) for i in 1:length(AICARS)]
+            if !AI_PHYSICS && AI_CHASSIS != "gold" && !isempty(sk) && all(!isnothing, sk)
+                kl = something(tryparse(Float64, get(ENV, "JM_AI_SKILL_KLINE", "1.0")), 1.0)
+                g = [get(AI_CHASSIS_GOLD, AISPECS[mod1(i, length(AISPECS))][1], 0.0) for i in 1:length(AICARS)]; qm = maximum(s.quick for s in sk)
+                for (i, c) in enumerate(AICARS); c.pace = (1.0 + minimum(g)/100)/(1.0 + g[i]/100)*(1.0 - kl*(1.0 - sk[i].quick/qm))*WET_PACE; end
+                println("  [aiskill] line-following pace (chassis gold x 1967 quickness, K ", kl, "): ",
+                        join(["$(AISPECS[mod1(i, length(AISPECS))][6]) $(round(100c.pace/WET_PACE, digits = 1)) %" for (i, c) in enumerate(AICARS)], ", "))
+            end
+        end
+
+        if AI_DRIVERSTYLE && WET_PACE < 1.0
+            for (i, c) in enumerate(AICARS)
+                d = driver_style(AISPECS[mod1(i, length(AISPECS))][6]); d === nothing || (c.pace *= (1.0 - (1.0 - WET_PACE)*d.wet)/WET_PACE)
+            end
+        end
+
         AI_RNG[] = Random.MersenneTwister(AI_SEED)
         _form = parse(Float64, get(ENV, "JM_AI_FORM", "0.012"))
         for c in AICARS; c.pace *= 1.0 + _form*clamp(randn(AI_RNG[]), -2.0, 2.0); end
 
         if AI_PHYSICS && RAI_SPREAD
             empty!(RAI_ENG); append!(RAI_ENG, [1.0 - RAI_SPREAD_K*_temper*(1.0 - pw[i]/pwmax) for i in 1:length(AICARS)])
+
+            DriveRT3D.ai_carphys_on() && fill!(RAI_ENG, 1.0)
             _pq = maximum(c.pace for c in AICARS)
-            q = [(0.9 + 0.1*rai_talent(String(AISPECS[mod1(i, length(AISPECS))][1]))/100) * (1.0 - RAI_SPREAD_K*(1.0 - AICARS[i].pace/_pq)) *
+            q = [(0.9 + 0.1*rai_talent_spec(AISPECS[mod1(i, length(AISPECS))])/100) * (1.0 - RAI_SPREAD_K*(1.0 - AICARS[i].pace/_pq)) *
                  (1.0 + RAI_QNOISE*clamp(randn(AI_RNG[]), -2.0, 2.0)) for i in 1:length(AICARS)]
             empty!(RAI_GRIDQ); append!(RAI_GRIDQ, q ./ maximum(q))
         end
@@ -11565,13 +11950,18 @@ function main()
             end
         end
     end
+    tstamp("  [REPLAYCUE] AI line mapped; AI cars next")
     AICHASSIS = AICARMODELS[1:length(AICARS)]
 
     AIPHYS = AICarT[]
     if AI_PHYSICS && AILINE !== nothing && isempty(REPLAY_FILE)
         print("  building $(length(AICARS)) physics AI (shared JM 3-D model)… "); flush(stdout)
         poses = [(p = RaceAI.pose_at(AILINE, c.s, c.lane); (p[1], p[3], p[4], 0.0)) for c in AICARS]
-        AIPHYS = AIbuild(poses)
+        AIPHYS = with_ai_base_setup(() -> AIbuild(poses; names = [String(AISPECS[mod1(i, length(AISPECS))][1]) for i in 1:length(AICARS)]))
+        ai_gearing!(AIPHYS, [String(AISPECS[mod1(i, length(AISPECS))][1]) for i in 1:length(AICARS)])
+        rai_brake_k!([String(AISPECS[mod1(i, length(AISPECS))][1]) for i in 1:length(AICARS)])
+        RAI_PROF_ON && (rai_prof_build!(AILINE); RAI_PROF_SAID[] = false)
+        (RAI_OBSLANE && RAI_OBSLIM[] === nothing) && (RAI_OBSLIM[] = rai_obslane(AILINE))
 
         if RAI_GRIDSEAT
             for (i, p) in enumerate(poses)
@@ -11580,14 +11970,25 @@ function main()
         end
         println("done")
 
-        empty!(RAI_TALENT); append!(RAI_TALENT, [0.9 + 0.1*rai_talent(String(AISPECS[mod1(i, length(AISPECS))][1]))/100 for i in 1:length(AICARS)])
+        empty!(RAI_TALENT); append!(RAI_TALENT, [0.9 + 0.1*rai_talent_spec(AISPECS[mod1(i, length(AISPECS))])/100 for i in 1:length(AICARS)])
+        let sk = [driver_skill(AISPECS[mod1(i, length(AISPECS))][6]) for i in 1:length(AICARS)]
+            if !isempty(sk) && all(!isnothing, sk)
+                qm = maximum(s.quick for s in sk)
+                RAI_TALENT .= [1.0 - AI_SKILL_K*(1.0 - s.quick/qm) for s in sk]
+                println("  [aiskill] pace (1967 quickness, K ", AI_SKILL_K, "): ", join(["$(AISPECS[mod1(i, length(AISPECS))][6]) $(round(100RAI_TALENT[i], digits = 1)) %" for i in 1:length(AICARS)], ", "))
+            end
+            rai_mistake_rates!(sk)
+        end
+        empty!(RAI_AGGR_CAR); append!(RAI_AGGR_CAR, [(d = driver_style(AISPECS[mod1(i, length(AISPECS))][6]); clamp(RAI_AGGR + (d === nothing ? 0.0 : d.aggr), 0.0, 1.0)) for i in 1:length(AICARS)])
+        AI_DRIVERSTYLE && println("  [aistyle] drivers: ", join(["$(AISPECS[mod1(i, length(AISPECS))][6]) (talent $(round(rai_talent_spec(AISPECS[mod1(i, length(AISPECS))]), digits = 1)), aggression $(round(RAI_AGGR_CAR[i], digits = 2)))" for i in 1:length(AICARS)], ", "))
         if RAI_SPREAD
             _pm = maximum(c.pace for c in AICARS); RAI_TALENT .*= [1.0 - RAI_SPREAD_K*(1.0 - c.pace/_pm) for c in AICARS]
             println("  [aiphys] Racecraft field: pace ", join(["$(AISPECS[mod1(i, length(AISPECS))][1]) $(round(100RAI_TALENT[i], digits = 1)) %" for i in 1:length(AICARS)], ", "),
                     "; engine ", join(["$(round(Int, 100RAI_ENG[i])) %" for i in eachindex(RAI_ENG)], "/"),
                     "; qualifying order ", join([AISPECS[mod1(i, length(AISPECS))][1] for i in sortperm(RAI_GRIDQ, rev = true)], ", "), " (seed ", AI_SEED, ")")
         end
-        empty!(RAI_MINSKILL); append!(RAI_MINSKILL, [rai_minskill(String(AISPECS[mod1(i, length(AISPECS))][1]))/100 for i in 1:length(AICARS)])
+        empty!(RAI_MINSKILL); append!(RAI_MINSKILL, [(d = driver_style(AISPECS[mod1(i, length(AISPECS))][6]); (d === nothing ? rai_minskill(String(AISPECS[mod1(i, length(AISPECS))][1])) : d.cons)/100) for i in 1:length(AICARS)])
+        AI_DRIVERSTYLE && println("  [aistyle] consistency (MinRacingSkill): ", join(["$(AISPECS[mod1(i, length(AISPECS))][6]) $(round(100RAI_MINSKILL[i], digits = 1))" for i in 1:length(AICARS)], ", "))
         empty!(RAI_SPELL); append!(RAI_SPELL, [(-1, -1) for _ in 1:length(AICARS)])
         println("  [aiphys] Racecraft plan: corners at ", round(RAI_AMAX_PLAN, digits = 1), " m/s2 (opponent pace ", round(Int, AI_PCT),
                 " %), braking ", round(RAI_BRAKE_PLAN, digits = 1), ", engine ", round(Int, 100RAI_POWER), " %; talents ",
@@ -11616,8 +12017,12 @@ function main()
                 "s, scale ", round(AI_SCALE,digits=2), ")")
     end
 
+    tstamp("  [REPLAYCUE] AI cars + physics done; CLASSICAI next")
     CLASSICAI_T = nothing; CLASSICAI_SC = 1.0; CLASSICAI_F = Ref{Any}(nothing); CLASSICAI_PH = Ref(0); CLASSICAI_PD = Ref((0.0, 0.0))
-    if (CLASSICAI_ON || (AI_PHYSICS && RAI_PIT_ON && AI_PITLINE)) && AILINE !== nothing && TRK_CAL.on && all(f -> isfile(joinpath(ZD, f * ".lp")), ("race", "minrace", "maxrace", "pass1", "pass2"))
+    PIT_STALL_T[] = nothing
+
+    _pitonly = AILINE === nothing && CLINE !== nothing && PITSTALL_ON && AI_PITLINE
+    if ((CLASSICAI_ON || (AI_PHYSICS && RAI_PIT_ON && AI_PITLINE)) && AILINE !== nothing || _pitonly) && TRK_CAL.on && all(f -> isfile(joinpath(ZD, f * ".lp")), ("race", "minrace", "maxrace", "pass1", "pass2"))
         try
             lines = Dict(k => CLASSICAI.read_line(joinpath(ZD, f * ".lp")) for (k, f) in
                          ((CLASSICAI.RACE, "race"), (CLASSICAI.MINR, "minrace"), (CLASSICAI.MAXR, "maxrace"), (CLASSICAI.PASS1, "pass1"), (CLASSICAI.PASS2, "pass2")))
@@ -11723,12 +12128,24 @@ function main()
                             "  pit on road ", JRTrack.hat3d(ROADHAT, wp[1], wp[2]; ref = Inf)[3], " corridor ", round.(CLASSICAI.corridor(CLASSICAI_T, x), digits = 1))
                 end
             end
-            if !CLASSICAI_ON
+            if !CLASSICAI_ON || _pitonly
                 RAI_PITT[] = CLASSICAI_T; CLASSICAI_T = nothing
                 println("  [pit] Racecraft: the cool-down lap ends in Classic's pit lane (JM_RAI_PIT=0: racing on)")
                 let (nm, mx, st) = rai_pit_clearance!(RAI_PITT[], RAI_PITT[].lines[CLASSICAI.PIT])
                     nm > 0 && println("  [pit] the pit line clears the pit lane's solids: ", nm, " m moved, up to ", round(mx, digits = 2), " m",
                                       st > 0 ? string("; ", st, " m still touching") : "")
+                end
+                read_pit_stalls!(joinpath(ZD, "track.ini")); PIT_STALL_T[] = RAI_PITT[]
+                println("  [pit] Classic's stalls: ", length(PIT_STALLS), isempty(PIT_STALLS) ? "" : string(" (stall_0 at ", PIT_STALLS[1][1], " m, lateral ", PIT_STALLS[1][2], ")"))
+                if get(ENV, "JM_PITSTALL_DIAG", "0") != "0"
+                    let L = RAI_PITT[].lines[CLASSICAI.PIT]
+                        for (k, (sd, sl)) in enumerate(PIT_STALLS)
+                            w = CLASSICAI.tworld(RAI_PITT[], sd, sl); wp = CLASSICAI.tworld(RAI_PITT[], sd, rai_pit_dlat(L, sd))
+                            println("  [pitstall] stall_", k - 1, " dlong ", sd, " dlat ", sl, " -> world (", round(w[1], digits = 2), ", ", round(w[2], digits = 2),
+                                    ")  pit line dlat ", round(rai_pit_dlat(L, sd), digits = 2), " at (", round(wp[1], digits = 2), ", ", round(wp[2], digits = 2),
+                                    ")  stall on road ", JRTrack.hat3d(ROADHAT, w[1], w[2]; ref = Inf)[3])
+                        end
+                    end
                 end
                 if get(ENV, "JM_RAI_PITDIAG", "0") == "2" && isfinite(PIT_IN[])
                     let L = RAI_PITT[].lines[CLASSICAI.PIT]
@@ -11760,6 +12177,8 @@ function main()
                     end
                 end
             else
+            read_pit_stalls!(joinpath(ZD, "track.ini")); PIT_STALL_T[] = CLASSICAI_T
+            println("  [pit] Classic's stalls: ", length(PIT_STALLS), " (the player's stall_", my_stall_index(), "; the line-following field)")
             gs = CLASSICAI.grip_scale(CLASSICAI_T)
 
             c1 = CLASSICAI.Car(CLASSICAI_T, 1, 10.0, CLASSICAI.dlat(lines[CLASSICAI.RACE], 10.0); v = 30.0)
@@ -11814,7 +12233,7 @@ function main()
             end
         catch e
             println("  → AI model: Classic unavailable (", sprint(showerror, e), ") -- the rail field runs instead")
-            CLASSICAI_T = nothing
+            CLASSICAI_T = nothing; PIT_STALL_T[] = RAI_PITT[]
         end
     end
     "the Classic field, built from AICARS (grid order, pace) the first time it is needed after a (re)start"
@@ -11830,10 +12249,12 @@ function main()
                 push!(cars, gc)
             end
             f = CLASSICAI.Field(CLASSICAI_T, cars; seed = rand(AI_RNG[], UInt32)); CLASSICAI_F[] = f
+            classicai_stall_start!(f, CLASSICAI_T, AICARS)
         end
         f
     end
 
+    tstamp("  [REPLAYCUE] CLASSICAI model + pace done")
     if AI_PHYSICS && haskey(ENV, "JM_AI_TEST") && !isempty(AIPHYS)
         for (i,pc) in enumerate(AIPHYS); p = RaceAI.pose_at(AILINE, AICARS[i].s, AICARS[i].lane); AIplace!(pc, p[1], p[3], p[4]; v=12.0); end
         N=length(AIPHYS); maxr=0.0; spins=0; maxlat=0.0; aidist=zeros(N); stuck=zeros(Int,N); scon=zeros(Int,N); lastx=[pc.x for pc in AIPHYS]; lastz=[pc.z for pc in AIPHYS]
@@ -11916,6 +12337,21 @@ function main()
         exit(0)
     end
 
+    tstamp("  [REPLAYCUE] AI set-up done (ffb next)")
+
+    stalls_clear!(PIT_STALL_T[])
+
+    if MODE == "practice" && PIT_STALL_T[] !== nothing && my_stall() !== nothing && !_DX_START_S && CLINE !== nothing && CAR3D && isempty(REPLAY_FILE) && !AUTODRIVE
+        let st_ = my_stall(), w_ = CLASSICAI.tworld(PIT_STALL_T[], st_[1], st_[2]), pc_ = RaceAI.project(CLINE, w_[1], w_[2])
+            place_at_s!(pc_[1], pc_[2])
+            STALL_HOLD[] = get(ENV, "JM_STALL_HOLD", "1") != "0"
+            STALL_PIN[] = (Float64(cs.x), Float64(cs.z), Float64(cs.θ))
+            println("  [pitstall] practice: you start in your stall (stall_", my_stall_index(), ") -- centreline s ", round(pc_[1], digits = 1), " lat ", round(pc_[2], digits = 1),
+                    "; world (", round(cs.x, digits = 2), ", ", round(cs.z, digits = 2), ") for the stall's (", round(w_[1], digits = 2), ", ", round(w_[2], digits = 2), ")")
+        end
+    end
+
+    (!isempty(AIPHYS) && isempty(REPLAY_FILE) && !haskey(ENV, "JM_AIPLACE")) && rai_stall_start!(AICARS, AIPHYS, AILINE, groundz)
     ffb = get(ENV, "JM_FFB_FAKE", "0") != "0" ? FFB.FFBDevice(Cint(-1), Int16(0), zeros(UInt8, 48), true, "fake") :
           (FFB_ON && !SMOKE) ? FFB.open_ffb() : nothing
     (ffb !== nothing && ffb.ok) ? println("  force feedback: ON  (", ffb.path, ", gain ", FFB_GAIN, ")") :
@@ -12547,6 +12983,7 @@ function main()
                     end
                     se = isempty(sp_) ? nothing : sleeve_ends(sp_, side); se === nothing && continue
                     W, E, nf = se
+                    GLOVE_CAP && foreach(p -> glove_cap!(p.verts), sp_)
                     S = (TEAM_SHOULDER[1], TEAM_SHOULDER[2], side*TEAM_SHOULDER[3])
                     Q = [Float64[p.verts[i+1], p.verts[i+2], p.verts[i+3]] for p in hands for i in 0:11:length(p.verts)-11 if sign(p.verts[i+3]) == side]
                     isempty(Q) && continue
@@ -12601,7 +13038,7 @@ function main()
             REP_TEAMLIVE || return (body = Render.build_classic(ps, idx), wheel = Render.Item[], hands = Render.Item[], shift = Render.Item[], glass = Render.Item[], wglass = Render.Item[],
                                     swc = Float32[0, 0, 0], swa = Float32[1, 0, 0], shp = Float32[0, 0, 0], mglass = mglass, tach = tach, dials = dials,
                                     dash = Render.Item[], arms = Render.Item[], lever_left = false, lever_d = Float32[0, 0, 0], sleeves = Any[], shlen = 0f0, shtip = Float32[0, 0, 0], shR = Render.ident(),
-                                    handsLR = [Render.Item[], Render.Item[]], fistc = [Float32[0, 0, 0], Float32[0, 0, 0]])
+                                    handsLR = [Render.Item[], Render.Item[]], fistc = [Float32[0, 0, 0], Float32[0, 0, 0]], name = lowercase(String(key)))
             lw(t) = lowercase(t)
             filter!(p -> !(lw(p.tex) in _TEAM_WHEEL_LO), ps)
             isw(p) = _team_wheeltex(p.tex) || _team_hand(p.tex)
@@ -12664,14 +13101,16 @@ function main()
                                                    for x in p.verts[t*33+1:t*33+33]], p.tex, p.col) for p in hpart]
             hlr = [filter(p -> !isempty(p.verts), sidep(s)) for s in (-1, 1)]
             fistc = [let P = [p.verts[i+1:i+3] for p in hs for i in 0:11:length(p.verts)-11]; isempty(P) ? Float32[0, 0, 0] : Float32.(sum(P) ./ length(P)) end for hs in hlr]
+
+            GLOVE_CAP && foreach(h -> foreach(p -> glove_cap!(p.verts), h), hlr)
             it = (body = Render.build_classic(bp, idx), wheel = Render.build_classic(filter(p -> !_team_hand(p.tex), wp), idx),
-                  hands = Render.build_classic(filter(p -> _team_hand(p.tex), wp), idx), shift = Render.build_classic(sp, idx),
+                  hands = Render.build_classic(GLOVE_CAP ? vcat(hlr...) : filter(p -> _team_hand(p.tex), wp), idx), shift = Render.build_classic(sp, idx),
                   glass = Render.build_classic(gp, idx), wglass = Render.build_classic(wgp, idx), swc = swc, swa = swa, shp = shp, mglass = mglass, tach = tach, dials = dials,
                   dash = Render.build_classic(dp, idx), arms = Render.build_classic(ap, idx),
                   lever_left = lowercase(key) in TEAM_LEVER_LEFT, lever_d = get(TEAM_LEVER_DT, lowercase(key), Float32[0, 0, 0]),
                   sleeves = [(items = Render.build_classic(q.parts, idx), W = q.W, E = q.E, nf = q.nf, cuff = q.cuff, S = q.S, nref = q.nref, thick = q.thick) for q in sleeves],
                   shlen = isempty(ys) ? 0f0 : Float32(maximum(ys) - minimum(ys)),
-                  shtip = shtip, shR = shR, handsLR = [Render.build_classic(h, idx) for h in hlr], fistc = fistc)
+                  shtip = shtip, shR = shR, handsLR = [Render.build_classic(h, idx) for h in hlr], fistc = fistc, name = lowercase(String(key)))
             println("  [teamcockpit] ", key, ": ", occursin("classicview", path) ? "1967-X/" * first(split(basename(dirname(path)), "-")) * "/" * basename(path) * " (view)" : relpath(path, AIBASE), " -- ", length(bp), " parts + wheel/gloves ", length(wp), ", lever ", length(sp),
                     ", glass ", length(gp), ", mirrors ", join(sort(collect(mtex)), "/"), " (live ", length(mglass), "), lo-res dash dropped ", join(dlo, "/"), ", tach ", tach === nothing ? "none" : "$(tspec[1]) at $(round.(tach.f.c; digits = 3))", ", dials ", length(dials), " (static needle slivers dropped ", nstat, ")",
                     "; seat moved ", round.(d; digits = 3), " m to the Lotus's; wheel centre ", round.(swc; digits = 3), "; lever foot ", round.(shp; digits = 3), " ", join(["$(p.tex):$(length(p.verts) ÷ 33) tris y $(round(minimum(p.verts[2:11:end]); digits = 3))..$(round(maximum(p.verts[2:11:end]); digits = 3))" for p in sp], " "))
@@ -12758,6 +13197,7 @@ function main()
         shot_idx[] = 1; shot_t0[] = 0
         CTL.view = SHOTS[1].view
         for (k, v) in SHOTS[1].env; ENV[k] = v; end
+        STALL_HOLD[] = false
         place_at_s!(SHOTS[1].s, parse(Float64, get(ENV, "JM_SHOT_LAT", "0")))
         println("  JM_SHOTS: ", length(SHOTS), " shots → ", SHOTS_DIR); flush(stdout)
     end
@@ -12801,6 +13241,8 @@ function main()
 
         if SMOKE && isempty(SHOTS) && !CRASH_ON && frames >= SMOKE_FRAMES
             INSTANT_TEST && REPLAY_REC && (INSTANT_REQ[] = true)
+            println("  [smoke] last frame: you at (", round(cs.x, digits = 2), ", ", round(cs.z, digits = 2), ") ", round(3.6cs.v, digits = 1),
+                    " km/h, gear ", cs.gear); flush(stdout)
             break
         end
         CRASH_ON && crash_i[] > length(CRASHES) && break
@@ -12814,6 +13256,13 @@ function main()
         last = now
         GEAR_NOW[] = cs.gear; RPM_NOW[] = cs.rpm; V_NOW[] = cs.v
         inp, rst, recover, restart = read_input()
+        let kz = key(GLFW.KEY_PAUSE)
+            pz = (kz && !PAUSE_PK[]) || PAUSE_HIT[]; PAUSE_PK[] = kz; PAUSE_HIT[] = false
+            (PAUSE_AT[1] > 0 && !PAUSE_AT_DONE[] && cs.t >= PAUSE_AT[1]) && (PAUSE_AT_DONE[] = true; pz = true)
+            if pz && !REPLAY && NETLINK === nothing
+                PAUSE_REQ[] = true; gearbox_notice!("PAUSED -- press Pause (or the pause button) to continue", 1.0e6)
+            end
+        end
         (rst, recover, restart) = input_hooks_step!(cs, dt, rst, recover, restart, race_go, LASTZ)
         inp = input_overrides(cs, inp, cd_armed, phase, race_go, HOLD_START)
 
@@ -12822,6 +13271,8 @@ function main()
             _rs = restart_session!(cs, cs0, groundz, groundz_phys, AICARS, AILINE, CLINE, DO_QUAL, HOLD_START, FUEL1, FUEL_ON, CLASSICAI_F, PLAYER_G, REPLAY_NCAR, ai_best, ai_lap_prev, ai_lapt0, burn_lap, fuel_laps, fuel, cd_armed, cd_left, cd_said, cd_t0, flush_ibt!, form_grid!, ibt_samples, launch_done, new_replay_path, phase, player_finpos, player_grid, player_laps, race_go, replay_buf, replay_names, replay_out, replay_saved, replay_t, tele_buf, player_s_prev)
             lap_t0 = _rs.lap_t0; last_lap = _rs.last_lap; best_lap = _rs.best_lap; prev_laps = _rs.prev_laps
             race_done = _rs.race_done; player_prog = _rs.player_prog; player_s_prev = _rs.player_s_prev
+
+            (!isempty(AIPHYS) && isempty(REPLAY_FILE) && !haskey(ENV, "JM_AIPLACE")) && rai_stall_start!(AICARS, AIPHYS, AILINE, groundz)
         end
 
         kp_ = key(GLFW.KEY_P); _adt = (kp_ && !ADRIVE_PK[]) || ADRIVE_BTN_HIT[]; ADRIVE_PK[] = kp_; ADRIVE_BTN_HIT[] = false
@@ -13034,7 +13485,7 @@ function main()
         DSTAT && (GPUSYNC && glFinish(); DS_T[1] = time(); Render.NDRAW[] = 0; Render.NTRI[] = 0; DS_SIMACC[1] += DS_T[1] - now; DS_SIMACC[2] += DS_SIM[1]; DS_SIMACC[3] += DS_SIM[2]; fill!(DS_SIM, 0.0))
 
         _tp_d = time()
-        lightVP = shadow_pass_step!(cs, depthprog, shadowfbo, bodyModel, wheelmat, loosemat, ai_poses, AICHASSIS, spin)
+        lightVP = shadow_pass_step!(cs, depthprog, shadowfbo, bodyModel, wheelmat, loosemat, ai_poses, AICHASSIS, spin, tiltModel, carModel, δ)
 
         drawworld = (vp_, eye_, flip::Bool) -> drawworld_impl!(vp_, eye_, flip, cs, AICHASSIS, _tp_d, aiBody, aiWheel, ai_poses, spin)
         DSTAT && (GPUSYNC && glFinish(); DS_T[2] = time(); DS_N[1] = Render.NDRAW[]; DS_N[4] = Render.NTRI[])
@@ -13048,6 +13499,7 @@ function main()
         DSTAT && (GPUSYNC && glFinish(); DS_T[3] = time(); DS_N[2] = Render.NDRAW[]; DS_N[5] = Render.NTRI[])
 
         main_pass_begin!(vp, eye, lightVP)
+        contact_shadows!(cs, ai_poses)
 
         ALLOCPROF > 0 && (ALLOC_MARK[3] = Base.gc_bytes())
         _t_world = time()
@@ -13086,6 +13538,7 @@ function main()
         ai_style_notice_draw!(W, H, cs.t, length(AICARS))
         REPLAY || yellow_flag_draw!(Float64(cs.t), W, H)
         REPLAY || pit_notice_draw!(W, H, Float64(cs.t))
+        REPLAY || pitin_banner_draw!(vp, eye, W, H, bf_pending(0) || meatball_on(Float64(cs.t)) || (race_done && cs.v > 0.5))
         CLUTCH_GATE[] > 0 && (CLUTCH_GATE[] -= dt)
         GEAR_MSG[] > 0 && (GEAR_MSG[] -= dt)
 
@@ -13098,7 +13551,12 @@ function main()
 
         gc_step!(frames)
         DSTAT && (GPUSYNC && glFinish(); DS_T[5] = time())
+        iconify_hook!(cs.t)
         GLFW.SwapBuffers(win)
+        if PAUSE_REQ[]
+            PAUSE_REQ[] = false; println("  [pause] at sim t ", round(cs.t, digits = 3)); pause_wait!(ffb); last = time(); PAUSE_T1[] = cs.t
+        end
+        (PAUSE_T1[] >= 0 && frames % 1 == 0 && cs.t > PAUSE_T1[]) && (println("  [pause] the next frame at sim t ", round(cs.t, digits = 3)); flush(stdout); PAUSE_T1[] = -1.0)
         frame_stats_step!()
 
         frame_dumps!(frames)
@@ -13132,6 +13590,7 @@ function main()
         mirror_ema_step!(frames)
         titleT = title_step!(cs, win, now, titleT, REPLAY, FUEL_ON, repd, rep_focus, rep_cam, rep_rt, rep_dur, rep_play, rep_speed, AICARS, standings, race_go, phase, cd_armed, cd_left, race_done, player_finpos, best_lap, fmt_lap, player_grid, fuel, burn_lap)
     end
+    INSTANT_REQ[] && instant_loading_frame!(ENG)
     telem !== nothing && close(telem)
 
     get(ENV, "JM_AISPIN_DIAG", "0") != "0" && println("  [aispin] shared ", round(spin, digits = 2), " drawn per car ",
