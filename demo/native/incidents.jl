@@ -35,7 +35,9 @@ function inc_player_step!(cs, grass_n::Int)
     (px, pz) = INC_PREV[]; INC_PREV[] = (Float64(cs.x), Float64(cs.z))
     if isfinite(px)
         dx = cs.x - px; dz = cs.z - pz
-        if hypot(dx, dz) > 0.05
+        d = hypot(dx, dz)
+
+        if d > 0.05 && cs.v > 3.0 && d < 0.2 + 0.1*cs.v
             β = abs(atan(sin(cs.θ - atan(dz, dx)), cos(cs.θ - atan(dz, dx))))
             inc_edge!(INC_SPUN, 0, β > deg2rad(100.0)) && inc_add!(0, 2, "loss of control", Float64(cs.t))
             β < deg2rad(45.0) && (INC_SPUN[0] = false)

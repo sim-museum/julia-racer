@@ -2447,6 +2447,7 @@ class Main(QMainWindow):
         self.garage = GarageTab(self.drive.setup_choice)
         self.garage.on_setups_changed = lambda name: self.drive.reload_setups(select="saved:" + name)
         self.garage.get_track = lambda: TRACK_KEYS[max(0, self.drive.track.currentIndex())]
+        self.garage.get_crossply = self.drive.crossply_on
         self.drive.carsetup.currentIndexChanged.connect(lambda _i: self.garage.load_session(keep_saved=True))
         self.drive.garage_file = self.garage.garage_file_for_launch
         self.garage.set_car(self.drive.playercar.currentData() or "lotus")

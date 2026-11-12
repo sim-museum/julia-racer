@@ -157,6 +157,7 @@ class GarageTab(QWidget):
         self._choice = get_choice
         self.on_setups_changed = None
         self.get_track = None
+        self.get_crossply = None
         self._sessions = gm.sessions()
         self._busy = False
         self.widgets = {}
@@ -669,7 +670,9 @@ class GarageTab(QWidget):
         with open(fn, "rb") as fh:
             g = classic_setup.decode_kj1(fh.read())
         med = gm.load_toml().get("classic", {}).get("arb_median")
-        K, notes = classic_setup.translate(g, self.session["knobs"], arb_median=tuple(med) if med else None)
+        xp = bool(self.get_crossply and self.get_crossply())
+        K, notes = classic_setup.translate(g, self.session["knobs"], arb_median=tuple(med) if med else None,
+                                       crossply=xp, car=classic_setup.car_of_file(fn) if xp else None)
         self.K = K
         self.refresh()
 
@@ -681,7 +684,8 @@ class GarageTab(QWidget):
     def export_classic_file(self, fn):
         """Write the garage as a Classic .kj1; returns the notes."""
         med = gm.load_toml().get("classic", {}).get("arb_median")
-        g, notes = classic_setup.export(self.K, self.session, arb_median=tuple(med) if med else None)
+        g, notes = classic_setup.export(self.K, self.session, arb_median=tuple(med) if med else None,
+                                    crossply=bool(self.get_crossply and self.get_crossply()))
         with open(fn, "wb") as fh:
             fh.write(classic_setup.encode_kj1(g))
         self.status.setText(f"exported {os.path.basename(fn)}")

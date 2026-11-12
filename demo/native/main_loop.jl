@@ -215,7 +215,11 @@ const PIT_PH = Ref(0)
 const PIT_HOLD = Ref((0.0, 0.0, 0.0))
 
 const PIT_ARMED = Ref(false)
-pitstop_reset!() = (PITSTOP[] = (:none, -Inf); MEATBALL_T[] = -Inf; MEATBALL_DMG[] = 0.0; MEATBALL_LAP[] = -1; PIT_ARMED[] = false; nothing)
+
+const PIT_LEFT = Ref(false)
+
+const RACE_GREEN_T = Ref(NaN)
+pitstop_reset!() = (PITSTOP[] = (:none, -Inf); MEATBALL_T[] = -Inf; MEATBALL_DMG[] = 0.0; MEATBALL_LAP[] = -1; PIT_ARMED[] = false; PIT_LEFT[] = false; nothing)
 
 "Is game (x, z) in a pit box? Classic's pit lane where the track has a pit line (frame `T`), else near the start/finish line."
 function in_pit_box(x, z, T, CLINE)
@@ -270,13 +274,14 @@ function pitstop_step!(cs, t::Float64, T, CLINE, refuel!, thr::Float64 = 0.0)
     if st === :none
         inbox = in_pit_box(cs.x, cs.z, T, CLINE)
         (!inbox && cs.v > 5.0) && (PIT_ARMED[] = true)
-        if cs.v < 0.5 && inbox && (PIT_ARMED[] || dmg >= MEATBALL_MIN)
+        inbox || (PIT_LEFT[] = false)
+        if cs.v < 0.5 && inbox && !PIT_LEFT[] && (PIT_ARMED[] || dmg >= MEATBALL_MIN)
             PITSTOP[] = (:service, t); PIT_HOLD[] = (Float64(cs.x), Float64(cs.z), Float64(cs.θ))
             println("  [pitstop] t=", round(t, digits = 2), " in the pit box: repairs, tyres", refuel! === nothing ? "" : ", fuel", " (", PIT_SECS, " s)"); flush(stdout)
         end
     elseif st === :service
         if thr > 0.3
-            PITSTOP[] = (:none, t); println("  [pitstop] t=", round(t, digits = 2), " left the box before the service was done"); flush(stdout)
+            PITSTOP[] = (:none, t); PIT_LEFT[] = true; println("  [pitstop] t=", round(t, digits = 2), " left the box before the service was done"); flush(stdout)
         elseif CAR3D
             DriveRT3D.pin3d!(cs, PIT_HOLD[][1], PIT_HOLD[][2], PIT_HOLD[][3], NaN)
         end
@@ -457,7 +462,7 @@ function countdown_step!(cs, AICARS, HOLD_START, ai_release, cd_armed, cd_left, 
             if cd_left[] <= 0 && !(START_ARM && !cd_armed[])
                 cd_left[] = 0.0
                 ctrace_start!("green", CTRACE_RACE)
-                race_go[] = true; lap_t0 = cs.t
+                race_go[] = true; lap_t0 = cs.t; RACE_GREEN_T[] = cs.t
                 ai_release[] = cs.t + AI_HEADSTART
                 println("  → GREEN"); flush(stdout)
                 for c in AICARS
@@ -612,6 +617,9 @@ function restart_session!(cs, cs0, groundz, groundz_phys, AICARS, AILINE, CLINE,
     empty!(AI_COOL); empty!(RAI_COOL); empty!(RAI_STALL_OF); empty!(RAI_PITH); rai_nosnap_reset!()
     BLUE_UNTIL[] = -1.0
     inc_reset!()
+    RACE_GREEN_T[] = NaN
+    pitstop_reset!()
+
     FFB_ARMED[] = false; FFB_STEER0[] = NaN; FFB_HELD[] = 0.0
     ADRIVE_ON[] = false; ADRIVE_AT[] = -1.0
 
@@ -1866,7 +1874,7 @@ function lap_timing_step!(cs, prev_laps, lap_t0, last_lap, best_lap, race_done, 
             end
             player_finpos[] = findfirst(e -> e[1] == 0, order)
             println("\n  ══════ YOU FINISHED — P$(player_finpos[]) of $(length(order))", cls_tag(0), " ══════")
-            println("  started P$(player_grid[])   best lap $(fmt_lap(best_lap))   total $(fmt_lap(cs.t))")
+            println("  started P$(player_grid[])   best lap $(fmt_lap(best_lap))   total $(fmt_lap(isfinite(RACE_GREEN_T[]) ? cs.t - RACE_GREEN_T[] : cs.t))")
 
             println("  ── R1 DIAG  (AI pace ", round(Int,AI_PCT), "% → target ", round(AI_TGT,digits=1),
                     "s/lap;  YOU laps=", cs.laps, " prog=", round(player_prog/(CLINE===nothing ? 1 : CLINE.total), digits=2), ") ──")
@@ -1909,7 +1917,7 @@ function lap_timing_step!(cs, prev_laps, lap_t0, last_lap, best_lap, race_done, 
                     println(io, "you_pos\t$(isempty(cls_status(0)) ? player_finpos[] : cls_status(0))"); println(io, "field\t$(length(order))")
                     haskey(DSQ, 0) && println(io, "you_dsq\t$(DSQ[0])")
                     println(io, "you_start\t$(player_grid[])")
-                    println(io, "you_best\t$(best_lap > 0 ? fmt_lap(best_lap) : "-")"); println(io, "you_total\t$(fmt_lap(cs.t))")
+                    println(io, "you_best\t$(best_lap > 0 ? fmt_lap(best_lap) : "-")"); println(io, "you_total\t$(fmt_lap(isfinite(RACE_GREEN_T[]) ? cs.t - RACE_GREEN_T[] : cs.t))")
                     println(io, "best_any\t$(isfinite(best_any) ? fmt_lap(best_any) : "-")\t$best_any_who")
                     println(io, "you_laps\t", join((fmt_lap(t) for t in player_laps), ","))
                     println(io, "win_total\t$(fmt_lap(lead_est))")
