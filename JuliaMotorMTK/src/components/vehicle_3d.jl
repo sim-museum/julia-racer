@@ -55,10 +55,19 @@ function DrivenVehicle3D(; name,
 
     iscale == (1.0, 1.0, 1.0) || (Izz *= iscale[1]; Ixx *= iscale[2]; Iyy *= iscale[3])
     kinF = brush && relax !== nothing && COLUMN_KIN
+    if brush && (@isdefined use_crossply) && use_crossply()
+
+        xo = crossply_car(crossply_team())
+        FL = CrossPlyTyre(; name=:FL, crossply_params(xo[1])..., camber=cmb, kin=kinF)
+        FR = CrossPlyTyre(; name=:FR, crossply_params(xo[2])..., camber=cmb, kin=kinF)
+        RL = CrossPlyTyre(; name=:RL, crossply_params(xo[3])..., camber=cmb)
+        RR = CrossPlyTyre(; name=:RR, crossply_params(xo[4])..., camber=cmb)
+    else
     FL = brush ? BrushTyre(; name=:FL, bf..., camber=cmb, nsh=nshf, kin=kinF) : Tyre(; name=:FL, TYRE_SKIDPAD_FRONT...)
     FR = brush ? BrushTyre(; name=:FR, bf..., camber=cmb, nsh=nshf, kin=kinF) : Tyre(; name=:FR, TYRE_SKIDPAD_FRONT...)
     RL = brush ? BrushTyre(; name=:RL, br...,  camber=cmb, nsh=nshr, ns=nsrv) : Tyre(; name=:RL, TYRE_SKIDPAD_REAR...)
     RR = brush ? BrushTyre(; name=:RR, br...,  camber=cmb, nsh=nshr, ns=nsrv) : Tyre(; name=:RR, TYRE_SKIDPAD_REAR...)
+    end
 
     gv, kfv, krv = g, karb_f, karb_r
 

@@ -48,8 +48,8 @@ def tyre_hints(imo, work=60.0):
 def tt_colour(T):
     return "#4a78ff" if T < 50 else "#2fbf4a" if T < 90 else "#e6c020" if T < 115 else "#ff3a1a"
 SESSION_KEYS = ("default", "ww103")
-BASE_NAMES = {"default": "reference default", "ww103": "WW103 fast loose"}
-PROVISIONAL_TIP = ("† Provisional range: the PO's reference capture (261017) shows this knob's values but not yet its "
+BASE_NAMES = {"default": "Default setup", "ww103": "WW103 fast loose"}
+PROVISIONAL_TIP = ("† Provisional range: the measured garage (261017) shows this knob's values but not yet its "
                    "limits; SETUPMODEL-1 Part C will settle them.")
 
 class KnobSpin(QDoubleSpinBox):
@@ -272,23 +272,23 @@ class GarageTab(QWidget):
         self.save_b.clicked.connect(self.save_as)
         self.load_b = QPushButton("Load…")
         self.load_b.clicked.connect(self.load_from)
-        self.classic_b = QPushButton("Import Classic setup…")
-        self.classic_b.setToolTip("CLASSICSETUP-1: read a Classic Lotus 49 setup (.kj1) and carry it to reference's knobs -- pressures, springs\n"
-                              "(Classic wheel rate -> reference spring rate), dampers and bars by range position, camber, toe, bias,\n"
-                              "fuel, diff and the nearest reference gearing. What reference's ranges cannot take is reported.")
+        self.classic_b = QPushButton("Import classic setup…")
+        self.classic_b.setToolTip("Read a classic-sim Lotus 49 setup (.kj1) and carry it to the garage's knobs -- pressures, springs\n"
+                              "(wheel rate -> spring rate), dampers and bars by range position, camber, toe, bias,\n"
+                              "fuel, diff and the nearest gearing. What the garage's ranges cannot take is reported.")
         self.classic_b.clicked.connect(self.import_classic)
 
-        self.classicx_b = QPushButton("Export Classic setup…")
-        self.classicx_b.setToolTip("SETUPIO-1: write this garage as a Classic Lotus 49 setup (.kj1, Classic's own file) -- pressures,\n"
-                               "springs (reference spring rate -> Classic wheel rate), dampers and bars by range position, camber,\n"
-                               "toe, bias, fuel, diff (ramps snap to Classic's 30/45/60/85) and Classic's nearest gear teeth.")
+        self.classicx_b = QPushButton("Export classic setup…")
+        self.classicx_b.setToolTip("Write this garage as a classic-sim Lotus 49 setup (.kj1) -- pressures,\n"
+                               "springs (spring rate -> wheel rate), dampers and bars by range position, camber,\n"
+                               "toe, bias, fuel, diff (ramps snap to 30/45/60/85) and the nearest gear teeth.")
         self.classicx_b.clicked.connect(self.export_classic)
-        self.sheet_b = QPushButton("Import reference sheet…")
-        self.sheet_b.setToolTip("SETUPIO-1: read an reference Lotus 49 setup sheet (.htm, the garage's Print/Export): every knob,\n"
-                                "camber and front toe as reference displays them; differences in derived numbers are reported.")
+        self.sheet_b = QPushButton("Import setup sheet…")
+        self.sheet_b.setToolTip("Read a Lotus 49 setup sheet (.htm, a garage Print/Export): every knob,\n"
+                                "camber and front toe as the sheet lists them; differences in derived numbers are reported.")
         self.sheet_b.clicked.connect(self.import_sheet)
-        self.sheetx_b = QPushButton("Export reference sheet…")
-        self.sheetx_b.setToolTip("SETUPIO-1: write this garage as an reference-layout setup sheet (.htm) with julia's derived numbers.")
+        self.sheetx_b = QPushButton("Export setup sheet…")
+        self.sheetx_b.setToolTip("Write this garage as a setup sheet (.htm) with julia's derived numbers.")
         self.sheetx_b.clicked.connect(self.export_sheet)
         self.guide_b = QPushButton("Setup guide…")
         self.guide_b.setToolTip("What each knob does, how to work through a setup, and a table of fixes by symptom.")
@@ -309,7 +309,7 @@ class GarageTab(QWidget):
             sc.setWidgetResizable(True)
             sc.setWidget(page)
             pages.addTab(sc, name)
-        note = QLabel("Derived numbers (in monospace) are reference's for the base session plus the garage model's change for the "
+        note = QLabel("Derived numbers (in monospace) are the measured ones for the base session plus the garage model's change for the "
                       "knobs you turn. † = range provisional.")
         note.setStyleSheet("color: #b9c7d3")
         note.setWordWrap(True)
@@ -688,7 +688,7 @@ class GarageTab(QWidget):
         return notes
 
     def export_classic(self):
-        fn, _ = QFileDialog.getSaveFileName(self, "Export as a Classic Lotus 49 setup", os.path.expanduser("~/julia_garage.kj1"),
+        fn, _ = QFileDialog.getSaveFileName(self, "Export as a classic Lotus 49 setup", os.path.expanduser("~/julia_garage.kj1"),
                                             "Classic Lotus 49 setups (*.kj1)")
         if not fn:
             return
@@ -696,10 +696,10 @@ class GarageTab(QWidget):
         try:
             notes = self.export_classic_file(fn)
         except Exception as e:
-            QMessageBox.warning(self, "Export Classic setup", f"Could not write {fn}: {e}")
+            QMessageBox.warning(self, "Export classic setup", f"Could not write {fn}: {e}")
             return
         QMessageBox.information(self, "Exported " + os.path.basename(fn),
-                                "The garage is now a Classic Lotus 49 setup (copy it to Classic's players/<you>/setups/<track>/).\n\n" + "\n".join(notes))
+                                "The garage is now a classic Lotus 49 setup (copy it to the sim's players/<you>/setups/<track>/).\n\n" + "\n".join(notes))
 
     def import_sheet_file(self, fn):
         """Read an reference setup sheet into the garage; returns the notes."""
@@ -715,14 +715,14 @@ class GarageTab(QWidget):
         return notes
 
     def import_sheet(self):
-        fn, _ = QFileDialog.getOpenFileName(self, "Import an reference Lotus 49 setup sheet", os.path.expanduser("~"),
-                                            "reference setup sheets (*.htm *.html *.txt);;All files (*)")
+        fn, _ = QFileDialog.getOpenFileName(self, "Import a Lotus 49 setup sheet", os.path.expanduser("~"),
+                                            "Setup sheets (*.htm *.html *.txt);;All files (*)")
         if not fn:
             return
         try:
             notes = self.import_sheet_file(fn)
         except Exception as e:
-            QMessageBox.warning(self, "Import reference sheet", f"Could not read {fn}: {e}")
+            QMessageBox.warning(self, "Import setup sheet", f"Could not read {fn}: {e}")
             return
         QMessageBox.information(self, "Imported " + os.path.basename(fn),
                                 "The sheet is now the garage (on the " + self.session_key + " base), saved as a setup you can choose on the Race tab.\n\n" +
@@ -734,7 +734,7 @@ class GarageTab(QWidget):
         self.status.setText(f"exported {os.path.basename(fn)}")
 
     def export_sheet(self):
-        fn, _ = QFileDialog.getSaveFileName(self, "Export as an reference setup sheet", os.path.expanduser("~/julia_garage.htm"),
+        fn, _ = QFileDialog.getSaveFileName(self, "Export as a setup sheet", os.path.expanduser("~/julia_garage.htm"),
                                             "Setup sheets (*.htm)")
         if not fn:
             return
@@ -742,20 +742,20 @@ class GarageTab(QWidget):
         try:
             self.export_sheet_file(fn)
         except Exception as e:
-            QMessageBox.warning(self, "Export reference sheet", f"Could not write {fn}: {e}")
+            QMessageBox.warning(self, "Export setup sheet", f"Could not write {fn}: {e}")
 
     def import_classic(self):
         start = os.path.expanduser("~")
-        fn, _ = QFileDialog.getOpenFileName(self, "Import a Classic Lotus 49 setup", start, "Classic Lotus 49 setups (*.kj1 *.lo1);;All files (*)")
+        fn, _ = QFileDialog.getOpenFileName(self, "Import a classic Lotus 49 setup", start, "Classic Lotus 49 setups (*.kj1 *.lo1);;All files (*)")
         if not fn:
             return
         try:
             notes = self.import_classic_file(fn)
         except Exception as e:
-            QMessageBox.warning(self, "Import Classic setup", f"Could not read {fn}: {e}")
+            QMessageBox.warning(self, "Import classic setup", f"Could not read {fn}: {e}")
             return
         QMessageBox.information(self, "Imported " + os.path.basename(fn),
-                                "The Classic setup is now the garage (on the " + self.session_key + " base), saved as a setup you can choose on the Race tab.\n\n" + "\n".join(notes))
+                                "The classic setup is now the garage (on the " + self.session_key + " base), saved as a setup you can choose on the Race tab.\n\n" + "\n".join(notes))
 
     def refresh(self):
         self._update_graphs()

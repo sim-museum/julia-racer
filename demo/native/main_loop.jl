@@ -718,6 +718,13 @@ function player_drive_step!(cs, inp, dt, rst, groundz, groundz_phys, roll_ter, f
     (WRECKED[] && WRECK_FROZEN[] && WRECK_PIN && CAR3D) && DriveRT3D.pin3d!(cs, WRECK_PX[], WRECK_PZ[], WRECK_PT[], WRECK_PH[])
     (STALL_HOLD[] && CAR3D && !WRECKED[] && isfinite(STALL_PIN[][1])) && DriveRT3D.pin3d!(cs, STALL_PIN[][1], STALL_PIN[][2], STALL_PIN[][3], NaN)
 
+    if GRID_PIN_ON && GRID_HELD[] && CAR3D && !WRECKED[] && !rst
+        isfinite(GRID_PIN[][1]) || (GRID_PIN[] = (Float64(cs.x), Float64(cs.z), Float64(cs.θ)))
+        DriveRT3D.pin3d!(cs, GRID_PIN[][1], GRID_PIN[][2], GRID_PIN[][3], NaN)
+    elseif !GRID_HELD[]
+        GRID_PIN[] = (NaN, NaN, NaN)
+    end
+
     if AIRBODY && CRASHBODY && CAR3D && !WRECKED[] && !rst && !SKIDPAD && maximum(cs.rh) > AIRBODY_RH
         AIRBORNE[] = true; AIR_LAND[] = 0.0; AIR_PEAK[] = (0.0, 0.0); ctrace_start!("launch")
         println(launch_msg(Float64(cs.v), cs.rh)); flush(stdout)
@@ -1315,7 +1322,7 @@ function hud_draw_step!(cs, inp, tc_hud, last_lap, best_lap, cd_armed, cd_left, 
                                         phase[] == :race && COUNTDOWN > 0) ? mod(cs.t, 1.0) : -1.0,
                            clutchgate=(CLUTCH_GATE[] > 0 ? inp.clutch : -1.0),
 
-                           finished=(race_done ? player_finpos[] : 0)), W, H)
+                           finished=(race_done && RACEEND_T0[] >= 0 && cs.t - RACEEND_T0[] < RACEEND_SECS ? player_finpos[] : 0)), W, H)
     nothing
 end
 
@@ -1394,7 +1401,8 @@ function input_overrides(cs, inp, cd_armed, phase, race_go, HOLD_START)
                                                          shift_up = false, shift_down = false, autoshift = true))
     end
 
-    if START_ARM && HOLD_START && !cd_armed[] && phase[] == :race && !race_go[]
+    GRID_HELD[] = START_ARM && HOLD_START && phase[] == :race && !race_go[]
+    if GRID_HELD[] && !cd_armed[]
         inp = JRTrack.DriveInput(throttle = 0.0, brake = 1.0, steer = inp.steer, clutch = inp.clutch,
                                     shift_up = inp.shift_up, shift_down = inp.shift_down, autoshift = inp.autoshift)
     end
@@ -1620,6 +1628,11 @@ function autodrive_step!(cs, CLINE, frames, dt, groundz, inp, ONTRACK)
             _k = clamp(floor(Int, mod(s0 + 2.0*cs.v, CLINE.total) / (ps[2] - ps[1])) + 1, 1, length(pv))
             _vt = ADRIVE_ON[] ? _pp * pv[_k] : min(_vt, _pp * pv[_k])
         end
+        if ADRIVE_ON[] && ADRIVE_VTRACE !== nothing
+            (ts_, tv_, tl_) = ADRIVE_VTRACE
+            sq_ = mod(s0 + ADRIVE_VTRACE_LOOK*cs.v, CLINE.total) * tl_ / CLINE.total
+            _vt = ADRIVE_VTRACE_K * tv_[clamp(searchsortedlast(ts_, sq_), 1, length(tv_))]
+        end
 
         _vt *= minimum(TT_MU)^AD_TT_EXP
         if AUTODRIVE_TRAFFIC || ADRIVE_ON[]
@@ -1812,6 +1825,12 @@ function replay_step!(cs, inp, dt, REP_AICOCKPIT, REP_NT, REP_TEAMCOCKPIT, rep_a
         ai_ = rep_ai_inputs(rep_rt[], rep_focus[])
         cs.v = ai_.v; cs.rpm = ai_.rpm; cs.gear = ai_.gear; rep_tyres[] = nothing; REP_TT_LIVE[] = false
         inp = DriveInput(throttle = 0.0, brake = 0.0, steer = ai_.steer, clutch = 0.0)
+    end
+    if rep_focus[] >= 1
+        av_ = rep_swap[] ? (v = Float64(cs.v), rpm = Float64(cs.rpm), gear = cs.gear) : rep_ai_inputs(rep_rt[], rep_focus[])
+        REP_VIEW[] = (Float64(rep_focus[]), Float64(av_.rpm), Float64(av_.gear), 3.6*Float64(av_.v))
+    else
+        REP_VIEW[] = (0.0, 0.0, 0.0, 0.0)
     end
     kw = key(GLFW.KEY_W); (kw && !rep_pw[]) && (rep_tyshow[] = !rep_tyshow[]); rep_pw[] = kw
 
@@ -2431,7 +2450,7 @@ function player_step3d!(cs, dt, rst, inp, groundz, ffb_jolt, groundz_phys, race_
         _w = wet_mu(cs.v); μFL *= _w; μFR *= _w; μRL *= _w; μRR *= _w
     end
 
-    rst || tt_step!(cs.tc, Float64(cs.v), Float64(dt), WETNESS)
+    rst || (CPT_ON ? cpt_car_step!(cs, Float64(cs.v), Float64(dt)) : tt_step!(cs.tc, Float64(cs.v), Float64(dt), WETNESS))
     μFL *= TT_MU[1]; μFR *= TT_MU[2]; μRL *= TT_MU[3]; μRR *= TT_MU[4]
     tt_diag(Float64(cs.t))
     rst || tt_rest_step!(Float64(cs.v), Float64(cs.t), Float64(dt))
@@ -2471,6 +2490,8 @@ function drawworld_impl!(vp_, eye_, flip::Bool, cs, AICHASSIS, _tp_d, aiBody, ai
             else; glDisable(GL_CULL_FACE); end
         end
         TRACKCULL && !infrustum(vp_, TRACKBOUND[ti][1], TRACKBOUND[ti][2]) && continue
+        _gc = (@isdefined TRACK_GROUNDCULL) && ti <= length(TRACK_GROUNDCULL) && TRACK_GROUNDCULL[ti]
+        _gc != _GC_STATE[] && (glUniform1i(Render.uloc(prog, "uGroundCull"), _gc ? 1 : 0); _GC_STATE[] = _gc)
         if MONZA
             cat = TRACKCAT[ti]
             b, a = cat === :road ? (MZ_ROAD_B, MZ_ROAD_A) : cat === :dark ? (MZ_DARK_B, MZ_DARK_A) :
@@ -2501,6 +2522,7 @@ function drawworld_impl!(vp_, eye_, flip::Bool, cs, AICHASSIS, _tp_d, aiBody, ai
     end
     _late && (glDepthMask(GL_TRUE); glEnable(GL_SAMPLE_ALPHA_TO_COVERAGE))
     glUniform1f(Render.uloc(prog,"uMaxDist"), 0f0)
+    _GC_STATE[] && (glUniform1i(Render.uloc(prog, "uGroundCull"), 0); _GC_STATE[] = false)
     (@isdefined SEC_FROM) && length(trackItems) >= SEC_FROM && glDisable(GL_CULL_FACE)
     if OBJ_CULLFACE
 
@@ -2942,7 +2964,7 @@ end
 """AISTYLE-1 S4 (spec §5.2): the Racecraft driver's speed plan along the rail -- the corner speed sqrt(a/|kappa|) per 2 m
 station (curvature the max over +-4 m, so a noisy node does not open a gap), then a backward pass with braking `b` m/s2 so
 every corner is braked for. Capped at 80 m/s; the wet scales both (wet_mu, WET_MUX). Returns (stations, speeds)."""
-function rai_profile(line, a, b; ds = 2.0)
+function rai_profile(line, a, b; ds = 2.0, wk = RAI_WETK[], wet::Bool = true)
     n = max(2, floor(Int, line.total/ds)); st = collect(0:n-1) .* ds
     κ = [maximum(abs(RaceAI.curv_at(line, mod(x + d, line.total))) for d in -4.0:2.0:4.0) for x in st]
 
@@ -3003,10 +3025,11 @@ function rai_profile(line, a, b; ds = 2.0)
         end
     end
 
-    vc(k) = (v_ = min(sqrt(a/max(k, 1e-5)), 80.0); for _ in 1:6; v_ = min(sqrt(a*wet_mu(v_)/max(k, 1e-5)), 80.0); end; v_)
+    wmu(u) = wet ? wk*wet_mu(u) : 1.0
+    vc(k) = (v_ = min(sqrt(a/max(k, 1e-5)), 80.0); for _ in 1:6; v_ = min(sqrt(a*wmu(v_)/max(k, 1e-5)), 80.0); end; v_)
     v = [vc(k) for k in κ]
     for _ in 1:2, k in n:-1:1
-        bw = b*wet_mu(v[k])*WET_MUX
+        bw = b*wmu(v[k])*(wet ? WET_MUX : 1.0)
         v[k] = min(v[k], sqrt(v[k == n ? 1 : k + 1]^2 + 2bw*ds))
     end
     (st, v)
@@ -3182,11 +3205,16 @@ const RAI_MISTAKE_RATE = max(something(tryparse(Float64, get(ENV, "JM_AI_MISTAKE
 const RAI_MRATE = Float64[]
 const RAI_MNEXT = Float64[]
 const RAI_MIST = Dict{Int,Tuple{Float64,Float64}}()
+
+const RAI_WETFIT = get(ENV, "JM_RAI_WETFIT", "0") != "0"
+const RAI_WETK_MAX = parse(Float64, get(ENV, "JM_RAI_WETK_MAX", "1.4"))
+const RAI_WETK = Ref(1.0)
+const RAI_WETMIST = max(parse(Float64, get(ENV, "JM_RAI_WETMIST", "2.0")), 0.0)
 function rai_mistake_rates!(sk)
     empty!(RAI_MRATE); empty!(RAI_MNEXT); empty!(RAI_MIST)
     for s in sk
         f = s === nothing ? 1.0 : max(0.4 + 2.5*(1.03 - 0.5*(s.exper + s.alert))/0.07, 0.2)*max(1.0 + 3.0*(s.aggr - 1.0), 0.5)
-        push!(RAI_MRATE, RAI_MISTAKE_RATE*f); push!(RAI_MNEXT, 60.0)
+        push!(RAI_MRATE, RAI_MISTAKE_RATE*f*(1.0 + RAI_WETMIST*(1.0 - WET_PACE)/0.155)); push!(RAI_MNEXT, 60.0)
     end
     (RAI_MISTAKE_RATE > 0 && !isempty(sk)) && (println("  [aiskill] mistakes per minute: ", join(["$(AISPECS[mod1(i, length(AISPECS))][6]) $(round(RAI_MRATE[i], digits = 3))" for i in eachindex(RAI_MRATE)], ", ")); flush(stdout))
     nothing
@@ -3222,9 +3250,45 @@ function rai_mistake!(i, s, v, onrace::Bool)
     ds > 15.0 && (delete!(RAI_MIST, i); return (1.0, false))
     (1.0 + 0.12*m[2], true)
 end
+"""TD261109-4 S1: the lap time of a Racecraft speed profile (stations, speeds) driven with a power-limited exit -- the engine
+share RAI_POWER of a car that runs 80 m/s flat out at full power (500 W/kg against drag), traction 8 m/s2 x the wet."""
+function rai_proflap(prof; wet::Bool = true)
+    (st, v) = prof; n = length(v); ds = st[2] - st[1]
+    pm = 500.0*RAI_POWER; cd = 500.0/80.0^3
+    w = copy(v)
+    for _ in 1:2, k in 1:n
+        j = k == n ? 1 : k + 1; u = w[k]
+        acc = max(min(8.0*(wet ? wet_mu(u)*WET_MUX : 1.0), pm/max(u, 5.0) - cd*u^2), 0.05)
+        w[j] = min(w[j], sqrt(u^2 + 2acc*ds))
+    end
+    sum(2ds/(w[k] + w[k == n ? 1 : k + 1]) for k in 1:n)
+end
+"TD261109-4 S1 (a): fit RAI_WETK -- the wet plan's grip and braking factor that makes its lap the dry plan's / WET_PACE."
+function rai_wetfit!(line)
+    RAI_WETK[] = 1.0
+    (RAI_WETFIT && WETNESS > 1) || return nothing
+    td = rai_proflap(rai_profile(line, RAI_AMAX_PLAN, RAI_BRAKE_PLAN; wk = 1.0, wet = false); wet = false)
+    tgt = td/WET_PACE
+    tw(k) = rai_proflap(rai_profile(line, RAI_AMAX_PLAN, RAI_BRAKE_PLAN; wk = k))
+    t1 = tw(1.0); k = 1.0
+    if t1 > tgt
+        lo = 1.0; hi = RAI_WETK_MAX
+        if tw(hi) > tgt
+            k = hi
+        else
+            for _ in 1:16; mid = 0.5*(lo + hi); tw(mid) > tgt ? (lo = mid) : (hi = mid); end
+            k = hi
+        end
+    end
+    RAI_WETK[] = k
+    println("  [rprof] wet plan: profile lap dry ", round(td, digits = 1), " s, wet ", round(t1, digits = 1), " s (x", round(t1/td, digits = 3),
+            "; measured x", round(1/WET_PACE, digits = 3), ") -> wet grip and braking x", round(k, digits = 3), " (JM_RAI_WETFIT=0: x1)"); flush(stdout)
+    nothing
+end
 """The Racecraft speed profiles (the plan's, the attacker's late braking, each chassis's own). Built during LOADING (drive_native_mtk.jl,
 after the field's braking factors): built on the race's first frame they compiled 420 ms at the green (warm race, Racecraft, 2026-11-07)."""
 function rai_prof_build!(line)
+    rai_wetfit!(line)
     RAI_PROF[] = rai_profile(line, RAI_AMAX_PLAN, RAI_BRAKE_PLAN)
     RAI_PROF_LATE[] = rai_profile(line, RAI_AMAX_PLAN, RAI_BRAKE_PLAN*RAI_LATE)
     rai_profs_percar!(line)
@@ -4159,6 +4223,7 @@ function aiphys_poses!(cs, ddt, ai_hit, AICARS, AILINE, AIPHYS, ai_onroad, ai_st
         else
             _tas = time(); DriveRT3D.step_car3d!(pc, thr, brk, st, ddt; manual=false, groundz=groundz_ai); DS_SIM[2] += time() - _tas
         end
+        ai_grip_step!(i, pc, Float64(pc.v), Float64(ddt), String(AISPECS[mod1(i, length(AISPECS))][1]))
         if RAI_CLASSICWALL && CLASSICW_PHYS && !rai_inpit(i)
             dvw = ai_classicwall_clamp!(i, pc)
             if dvw > 1.0 && RAI_CLOCK[] - get(RAI_WALLT, i, -Inf) > 1.0

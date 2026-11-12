@@ -497,9 +497,18 @@ function ai_gearing!(cars, names)
     (AI_SETUP && !isempty(cars)) || return nothing
     tab = get(AI_GEARING, lowercase(CLASSICNAME), nothing)
     fins = [tab === nothing ? DriveRT3D.FINAL0 : get(tab, String(nm), DriveRT3D.FINAL0) for nm in names]
-    for (c, f) in zip(cars, fins); DriveRT3D.set_cargear!(c, DriveRT3D.GEARS0, f); end
+    own = String[]
+    for (c, f, nm) in zip(cars, fins, names)
+        g = get(AI_GEAR_OWN, lowercase(String(nm)), nothing)
+        if g !== nothing && get(ENV, "JM_AI_CLASSICGEAR", "1") != "0" && length(g[1]) == length(DriveRT3D.GEARS0) && isfinite(g[2]) && g[2] > 0
+            DriveRT3D.set_cargear!(c, g[1], g[2]); push!(own, string(nm, " ", round(g[2], digits = 3)))
+        else
+            DriveRT3D.set_cargear!(c, DriveRT3D.GEARS0, f)
+        end
+    end
     println("  [aisetup] gearing: the Lotus's gear set; final ", join(["$(nm) $(f)" for (nm, f) in zip(names, fins)], ", "),
-            tab === nothing ? " (no table for $(CLASSICNAME): the Lotus's own $(DriveRT3D.FINAL0))" : " ($(CLASSICNAME)); the player's session: final $(DriveRT3D.FINAL[])")
+            tab === nothing ? " (no table for $(CLASSICNAME): the Lotus's own $(DriveRT3D.FINAL0))" : " ($(CLASSICNAME)); the player's session: final $(DriveRT3D.FINAL[])",
+            isempty(own) ? "" : string("; on their Classic setups' own gears instead: ", join(unique(own), ", ")))
     nothing
 end
 "An AISPECS entry's talent: its driver's, else (no style, or JM_AI_DRIVERSTYLE=0) the chassis hash as before."
@@ -1175,8 +1184,8 @@ const IBTTMPL_DEFAULT = let want = (SKIDPAD ? "lotus49_skidpad" : "lotus49_nurbu
 end
 
 const CARSETUPS = (
-    (key = "default", label = "reference default",  note = "the reference Lotus 49 setup Julia has always raced"),
-    (key = "ww103",   label = "WW103 fast loose", note = "Wolfgang Wagner's Classic Watkins Glen setup via reference: soft front, stiff rear bar, 35° drive ramp, toe-out"),
+    (key = "default", label = "Default setup",    note = "the Lotus 49 setup Julia has always raced"),
+    (key = "ww103",   label = "WW103 fast loose", note = "Wolfgang Wagner's classic Watkins Glen setup, measured: soft front, stiff rear bar, 35° drive ramp, toe-out"),
 )
 function choose_carsetup()
     haskey(ENV, "JM_CARSETUP") && return lowercase(strip(ENV["JM_CARSETUP"]))
@@ -1221,7 +1230,7 @@ const IBTTMPL = if CARSETUP == "ww103"
 else
     IBTTMPL_DEFAULT
 end
-println("  car setup: ", CARSETUP == "ww103" && IBTTMPL != IBTTMPL_DEFAULT ? "WW103 fast loose" : "reference default",
+println("  car setup: ", CARSETUP == "ww103" && IBTTMPL != IBTTMPL_DEFAULT ? "WW103 fast loose" : "Default setup",
         "   <- ", basename(IBTTMPL))
 
 function apply_session_setup!()
@@ -1299,22 +1308,68 @@ function with_ai_base_setup(f)
 end
 function _with_ai_base_setup(f)
     g = get(ENV, "JM_GARAGE", "")
+
+    ag = get(ENV, "JM_AI_GARAGE", ""); ag_on = !isempty(ag) && isfile(ag)
     mine = (!isempty(g) && isfile(g)) || !SetupTab.is_default(SETUP)
-    (get(ENV, "JM_AI_BASESETUP", "1") != "0" && mine) || return f()
+    (get(ENV, "JM_AI_BASESETUP", "1") != "0" && (mine || ag_on)) || return f()
     snap = DriveRT3D.setup_snapshot()
     keep = (GARAGE_NOTE[], GARAGE_PP[], FUEL_SETUP_L[], STEER_RATIO[], STEER_GAIN[], STEER_LIM[])
     ks_me = DriveRT3D.KS[]
     try
         redirect_stdout(devnull) do
-            withenv(() -> apply_session_setup!(), "JM_GARAGE" => nothing)
+            withenv(() -> apply_session_setup!(), "JM_GARAGE" => (ag_on ? ag : nothing))
         end
-        println("  [aisetup] the AI's base setup: the session's default (springs ", join((round(Int, k) for k in DriveRT3D.KS[]), "/"),
+        println("  [aisetup] the AI's base setup: ", ag_on ? "JM_AI_GARAGE " * basename(ag) : "the session's default", " (springs ", join((round(Int, k) for k in DriveRT3D.KS[]), "/"),
                 " N/m), not yours (", join((round(Int, k) for k in ks_me), "/"), ")"); flush(stdout)
         return f()
     finally
         DriveRT3D.setup_restore!(snap)
         GARAGE_NOTE[], GARAGE_PP[], FUEL_SETUP_L[], STEER_RATIO[], STEER_GAIN[], STEER_LIM[] = keep
     end
+end
+
+const AI_SETUP_TYREOBJ = Set(["μx0", "μy0", "b", "k1", "k2", "fzca", "ck", "kγ", "γh"])
+const AI_SETUP_SKIP = Set(["final", "M_s", "m", "Izz", "Ixx", "Iyy", "a", "b", "mf", "mr", "L", "tf", "tr", "h", "gear", "ekR", "ekP"])
+
+const AI_PCOLD = Dict{String,NTuple{4,Float64}}()
+
+const AI_GEAR_OWN = Dict{String,Tuple{Vector{Float64},Float64}}()
+function ai_setup_overrides(names)
+    spec = get(ENV, "JM_AI_GARAGES", ""); isempty(spec) && return nothing
+    files = Dict{String,String}()
+    for kv in split(spec, ';'; keepempty = false)
+        i = findfirst('=', kv); i === nothing && continue
+        files[lowercase(strip(kv[1:i-1]))] = String(strip(kv[i+1:end]))
+    end
+    brush = !haskey(ENV, "JM_MAGIC")
+    base = DriveRT3D.with_lotus(() -> DriveRT3D._vehicle_pdefaults(brush))
+    out = Dict{String,Dict{String,Float64}}()
+    for nm in unique(String.(names))
+        f = get(files, lowercase(nm), ""); isfile(f) || continue
+        snap = DriveRT3D.setup_snapshot()
+        keep = (GARAGE_NOTE[], GARAGE_PP[], FUEL_SETUP_L[], STEER_RATIO[], STEER_GAIN[], STEER_LIM[])
+        try
+            redirect_stdout(devnull) do
+                withenv(() -> apply_session_setup!(), "JM_GARAGE" => f)
+            end
+            mine = DriveRT3D.with_lotus(() -> DriveRT3D._vehicle_pdefaults(brush))
+            ch_ = DriveRT3D.CHASSIS[]
+            (hasproperty(ch_, :pressure) && ch_.pressure !== nothing && length(ch_.pressure) == 4) &&
+                (AI_PCOLD[lowercase(nm)] = ntuple(k -> Float64(ch_.pressure[k])/6.894757, 4))
+            AI_GEAR_OWN[lowercase(nm)] = (Float64.(copy(DriveRT3D.GEARS)), Float64(DriveRT3D.FINAL[]))
+            out[nm] = Dict(k => v for (k, v) in mine if !(k in AI_SETUP_SKIP) && !(split(k, "₊")[end] in AI_SETUP_TYREOBJ) &&
+                                                       haskey(base, k) && !isapprox(v, base[k]; rtol = 1e-9, atol = 0.0))
+            println("  [aisetup] ", nm, ": its own Classic setup (", basename(f), ") sets ", length(out[nm]), " parameters",
+                    haskey(AI_PCOLD, lowercase(nm)) ? string(", cold ", join(round.(AI_PCOLD[lowercase(nm)], digits = 1), "/"), " psi") : "", ": ",
+                    join((string(k, " ", round(out[nm][k], sigdigits = 4)) for k in sort(collect(keys(out[nm])))[1:min(end, 16)]), ", ")); flush(stdout)
+        catch err
+            println("  [aisetup] ", nm, ": its Classic setup could not be applied (", sprint(showerror, err)[1:min(end, 120)], ")")
+        finally
+            DriveRT3D.setup_restore!(snap)
+            GARAGE_NOTE[], GARAGE_PP[], FUEL_SETUP_L[], STEER_RATIO[], STEER_GAIN[], STEER_LIM[] = keep
+        end
+    end
+    isempty(out) ? nothing : out
 end
 
 const NETMODE  = lowercase(get(ENV, "JM_NET", ""))
@@ -1493,6 +1548,21 @@ function pause_wait!(ffb)
 end
 const ADRIVE_PACE = parse(Float64, get(ENV, "JM_AIDRIVE_PACE", "0.75"))
 const AUTODRIVE_PROF_PACE = parse(Float64, get(ENV, "JM_AUTODRIVE_PROFILE", "0"))
+
+const ADRIVE_VTRACE = let p = get(ENV, "JM_AIDRIVE_VTRACE", "")
+    if isempty(p) || !isfile(p)
+        nothing
+    else
+        S_ = Float64[]; V_ = Float64[]
+        for l in eachline(p)
+            (startswith(l, "#") || isempty(strip(l))) && continue
+            a = split(l); push!(S_, parse(Float64, a[1])); push!(V_, parse(Float64, a[2]))
+        end
+        (S_, V_, parse(Float64, get(ENV, "JM_AIDRIVE_VTRACE_LEN", string(2S_[end] - S_[end-1]))))
+    end
+end
+const ADRIVE_VTRACE_K = parse(Float64, get(ENV, "JM_AIDRIVE_VTRACE_K", "1.0"))
+const ADRIVE_VTRACE_LOOK = parse(Float64, get(ENV, "JM_AIDRIVE_VTRACE_LOOK", "1.0"))
 const AUTODRIVE_PROF = Ref{Any}(nothing)
 const GROUND_LAT_SMOOTH = get(ENV, "JM_GROUND_LAT_SMOOTH", "0") != "0"
 const AUTODRIVE_DIAG = parse(Int, get(ENV, "JM_AUTODRIVE_DIAG", "0"))
@@ -1515,7 +1585,7 @@ const SKIDDRIVE = let s = get(ENV, "JM_SKIDPAD_DRIVE", "")
         segs
     end
 end
-const AI_LAPDIAG = get(ENV, "JM_AI_LAPDIAG", "0") != "0"
+const AI_LAPDIAG = get(ENV, "JM_AI_LAPDIAG", "1") != "0"
 
 const NETPOSES = Ref(Tuple{Int,NTuple{6,Float64}}[])
 
@@ -3400,6 +3470,13 @@ else
         rc
     end
     const TRACK_BOARDCULL = _track_boardcull(TRACK, TRACK_RAILCULL, SEC_FROM)
+
+    const GROUNDCULL_ON = get(ENV, "JM_GROUNDCULL", "1") != "0"
+    const TRACK_GROUNDCULL = [GROUNDCULL_ON && pi < SEC_FROM && !(pi <= length(TRACK_RAILCULL) && TRACK_RAILCULL[pi]) &&
+                              !(pi <= length(TRACK_BOARDCULL) && TRACK_BOARDCULL[pi]) &&
+                              occursin(r"grass|bank|dirt|sand|gravel|field", lowercase(p.tex)) for (pi, p) in enumerate(TRACK)]
+    GROUNDCULL_ON && println("  [groundcull] ", count(TRACK_GROUNDCULL), " ground parts drop their undersides (",
+                             join(unique(TRACK[pi].tex for pi in findall(TRACK_GROUNDCULL)), ", "), "; JM_GROUNDCULL=0: off)")
 
     if haskey(ENV, "JM_TRIDUMP_AT")
         let a = split(ENV["JM_TRIDUMP_AT"], ","), tx = lowercase(a[1]), (x0, z0, r0) = parse.(Float64, a[2:4])
@@ -5837,7 +5914,7 @@ const AIyaw   = DriveRT3D.yawrate3d
 const AIbump! = DriveRT3D.bump3d!
 const AIplace! = DriveRT3D.place3d!
 const FENCE = parse(Float64, get(ENV, "JM_FENCE", "13.0"))
-const RACEEND_SECS = parse(Float64, get(ENV, "JM_RACEEND_SECS", "12"))
+const RACEEND_SECS = parse(Float64, get(ENV, "JM_RACEEND_SECS", "5"))
 const RACEEND_T0 = Ref(-1.0)
 const RUNOFF_W = parse(Float64, get(ENV, "JM_RUNOFF_W", "20.0"))
 const FENCE_GRACE = parse(Float64, get(ENV, "JM_FENCE_GRACE", "2.5"))
@@ -10158,6 +10235,10 @@ const START_AUTO = CTL.auto
 const STALL_HOLD = Ref(false)
 
 const STALL_PIN = Ref((NaN, NaN, NaN))
+const _GC_STATE = Ref(false)
+const GRID_HELD = Ref(false)
+const GRID_PIN = Ref((NaN, NaN, NaN))
+const GRID_PIN_ON = get(ENV, "JM_GRID_PIN", "1") != "0"
 const GEAR_MSG = Ref(0.0)
 const STALL_AT = parse(Float64, get(ENV, "JM_STALL_AT", "-1"))
 const STALL_AT_DONE = Ref(false)
@@ -11971,7 +12052,8 @@ function main()
     if AI_PHYSICS && AILINE !== nothing && isempty(REPLAY_FILE)
         print("  building $(length(AICARS)) physics AI (shared JM 3-D model)… "); flush(stdout)
         poses = [(p = RaceAI.pose_at(AILINE, c.s, c.lane); (p[1], p[3], p[4], 0.0)) for c in AICARS]
-        AIPHYS = with_ai_base_setup(() -> AIbuild(poses; names = [String(AISPECS[mod1(i, length(AISPECS))][1]) for i in 1:length(AICARS)]))
+        AIPHYS = with_ai_base_setup(() -> (_nms = [String(AISPECS[mod1(i, length(AISPECS))][1]) for i in 1:length(AICARS)];
+                                           AIbuild(poses; names = _nms, setup_ov = ai_setup_overrides(_nms))))
         ai_gearing!(AIPHYS, [String(AISPECS[mod1(i, length(AISPECS))][1]) for i in 1:length(AICARS)])
         rai_brake_k!([String(AISPECS[mod1(i, length(AISPECS))][1]) for i in 1:length(AICARS)])
         RAI_PROF_ON && (rai_prof_build!(AILINE); RAI_PROF_SAID[] = false)
@@ -13138,6 +13220,15 @@ function main()
         dθ = mod(a1[k][4] - a0[k][4] + π, 2π) - π
         ds = hypot(a1[k][1] - a0[k][1], a1[k][3] - a0[k][3]); dtt = max(min(rt + h, rep_dur) - max(rt - h, 0.0), 1e-3)
         v = ds/dtt; r = dθ/dtt
+
+        na_ = (hasproperty(repd, :tele) && !isempty(repd.tele)) ? length(repd.tele_ai) : 0
+        ks_ = na_ > 0 ? something(findfirst(==("speed"), repd.tele_ai), 0) : 0
+        if ks_ > 0 && k >= 1
+            nt_ = length(repd.tele_p) + na_*(repd.ncar - 1); tl_ = repd.tele; nf_ = length(tl_) ÷ nt_
+            f_ = clamp(rt*repd.fps, 0.0, nf_ - 1.0); i0_ = floor(Int, f_); i1_ = min(i0_ + 1, nf_ - 1); g_ = f_ - i0_
+            j_ = length(repd.tele_p) + (k - 1)*na_ + ks_
+            v = Float64(tl_[i0_*nt_ + j_])*(1 - g_) + Float64(tl_[i1_*nt_ + j_])*g_
+        end
         δ = v > 2.0 ? atan(2.41*r/v) : 0.0
         g = 1
         for gg in 1:length(DriveRT3D.GEARS)

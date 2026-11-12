@@ -5,7 +5,7 @@ PO 2026-10-17: "add functionality to import a Classic lotus 49 setup and transla
 The .kj1 layout is classic.exe's own serialiser ('PGTS' v3; JuliaMotorMTK/tools/classicsetup_decode.jl has the decomp notes).
 The translation follows WWSETUP-1's rules (PRODUCT_BACKLOG.md "WWSETUP-1"), the ones the PO's WW103 was carried to
 reference with:
-  * PHYSICAL where both games expose the same quantity -- tyre pressure (psi -> kPa), camber (deg), toe (in -> mm),
+  * PHYSICAL where both games expose the same quantity -- tyre pressure (psi -> kPa), camber (deg), toe (the same wheel angle),
     brake bias (%), fuel (US gal -> L), diff ramp angles (deg) and clutch plates, the overall gearing (each gear's
     ratio x final, matched to reference's ratio lists), and the springs: Classic's WHEEL rate through the garage's measured
     spring-to-wheel ratios (front 0.81, rear 0.669) to an reference SPRING rate;
@@ -23,11 +23,24 @@ import garage as gm
 LBIN = 0.175127
 MRK = (0.809881, 0.668786)
 
+CLASSIC_TOE_RAD_PER_IN = 0.04 * 0.5
+TOE_DIAM_M = (0.60, 2 * 0.334)
+
+def classic_toe_to_mm(inch, axle, crossply=True):
+    if not crossply:
+        return inch * 25.4
+    return math.tan(CLASSIC_TOE_RAD_PER_IN * inch) * TOE_DIAM_M[axle] * 1000
+
+def mm_to_classic_toe(mm, axle, crossply=True):
+    if not crossply:
+        return mm / 25.4
+    return math.atan(mm / 1000 / TOE_DIAM_M[axle]) / CLASSIC_TOE_RAD_PER_IN
+
 CLASSIC_ARB_MEDIAN = (None, None)
 
 def decode_kj1(data: bytes):
     if data[:4] != b"PGTS" or len(data) < 0x104:
-        raise ValueError("not a Classic setup file (no 'PGTS' header)")
+        raise ValueError("not a classic setup file (no 'PGTS' header)")
     f = lambda o, n: list(struct.unpack_from("<%df" % n, data, o))
     i = lambda o, n: list(struct.unpack_from("<%di" % n, data, o))
     g = f(0x0C, 9)
@@ -43,8 +56,13 @@ def _clamp_step(v, lo, hi, step, base=0.0):
     c = min(max(v, lo), hi)
     return base + round((c - base) / step) * step, (c != v)
 
-def translate(classic, base_knobs, arb_median=None):
-    """Classic setup (decode_kj1) -> (garage knobs, notes). `base_knobs` supplies every knob Classic has no equivalent for."""
+CAR_KR = {"lotus": 1.0, "eagle": 9500 / 9000, "ferrari": 10000 / 9000, "brabham": 8800 / 9000, "cooper": 1.0,
+          "honda": 11500 / 9000, "brm": 10500 / 9000}
+
+def translate(classic, base_knobs, arb_median=None, crossply=False, car=None):
+    """Classic setup (decode_kj1) -> (garage knobs, notes). `base_knobs` supplies every knob Classic has no equivalent for.
+    crossply (TYRECHOICE-1 S7): the setup is for the cross-ply tyre it was made for -- its pressures are kept as they are
+    (the cross-ply tyre's thermal model reads them), not moved into the radial garage's range."""
     K = {k: (list(v) if isinstance(v, list) else v) for k, v in base_knobs.items()}
     notes = []
 
@@ -55,8 +73,11 @@ def translate(classic, base_knobs, arb_median=None):
     sp = _spec("pressure")
     pr = []
     for i, psi in enumerate(classic["psi"]):
-        v, c = _clamp_step(psi * 6.895, sp["min"], sp["max"], sp["step"], sp["min"])
-        note_clamp(f"pressure {('LF', 'RF', 'LR', 'RR')[i]}", c, psi * 6.895, v, " kPa")
+        if crossply:
+            v = round(psi * 6.895, 1)
+        else:
+            v, c = _clamp_step(psi * 6.895, sp["min"], sp["max"], sp["step"], sp["min"])
+            note_clamp(f"pressure {('LF', 'RF', 'LR', 'RR')[i]}", c, psi * 6.895, v, " kPa")
         pr.append(round(v, 1))
     K["pressure"] = pr
 
@@ -76,7 +97,7 @@ def translate(classic, base_knobs, arb_median=None):
 
     cs = _spec("camber")
     K["camber"] = [round(min(max(c, cs["min"]), cs["max"]), 1) for c in classic["camber"]]
-    for key, v in (("toe_front", classic["toe"][0] * 25.4), ("toe_rear", classic["toe"][1] * 25.4)):
+    for key, v in (("toe_front", classic_toe_to_mm(classic["toe"][0], 0, crossply)), ("toe_rear", classic_toe_to_mm(classic["toe"][1], 1, crossply))):
         s = _spec(key)
         got, c = _clamp_step(v, s["min"], s["max"], s["step"])
         note_clamp(key.replace("_", " "), c, round(v, 1), got, " mm")
@@ -111,10 +132,14 @@ def translate(classic, base_knobs, arb_median=None):
         if best is None or err < best[0]:
             best = (err, fd, pick)
     K["final_drive"], K["gears"] = float(best[1]), [float(r) for r in best[2]]
-    kmh_g = [gm.PARAMS["rpm_r"] * 2 * math.pi / 60 / w * 3.6 for w in want]
-    kmh_i = gm.gear_speeds_kmh(K)
-    notes.append("gears (top speed, Classic -> reference's nearest ratios): " +
-                 ", ".join(f"{a:.0f}->{b:.0f}" for a, b in zip(kmh_g, kmh_i)) + " km/h")
+    if crossply:
+        K["final_drive"] = float(classic["final"]) / CAR_KR.get(car or "lotus", 1.0)
+        K["gears"] = [float(g) for g in classic["gears"][:5]]
+    else:
+        kmh_g = [gm.PARAMS["rpm_r"] * 2 * math.pi / 60 / w * 3.6 for w in want]
+        kmh_i = gm.gear_speeds_kmh(K)
+        notes.append("gears (top speed, classic -> the garage's nearest ratios): " +
+                     ", ".join(f"{a:.0f}->{b:.0f}" for a, b in zip(kmh_g, kmh_i)) + " km/h")
 
     med = arb_median or CLASSIC_ARB_MEDIAN
     if med[0] and med[1]:
@@ -148,7 +173,7 @@ def translate(classic, base_knobs, arb_median=None):
     rh = gm.solve_static(K)["rh"]
     notes.append("perches re-set to keep the base car's ride heights: " + "/".join(f"{p:.1f}" for p in K["perch"]) +
                  " mm (ride heights " + "/".join(f"{x:.1f}" for x in rh) + " mm)")
-    notes.append("not carried: Classic's ride height and bump rubbers (measured differently)")
+    notes.append("not carried: the classic ride height and bump rubbers (measured differently)")
     return K, notes
 
 CLASSIC_TEETH = ((13, 46), (14, 46), (14, 45), (12, 35), (13, 35), (16, 42), (15, 38), (14, 34), (14, 33), (14, 32),
@@ -179,7 +204,7 @@ def encode_kj1(g: dict) -> bytes:
     b = b"PGTS" + struct.pack("<ii", 3, len(p)) + bytes(p)
     return b + b" " * ((-len(b)) % 4)
 
-def export(K, session, arb_median=None):
+def export(K, session, arb_median=None, crossply=False):
     """Garage knobs K (on `session`) -> (Classic setup dict for encode_kj1, notes). The inverse of translate(): physical
     where both games share the quantity, range position where the units differ, Classic's own tooth table for the gearing."""
     notes = []
@@ -199,7 +224,7 @@ def export(K, session, arb_median=None):
     idx = [4, 0] + pick + [sixth, fi]
     ratios = [-teeth_ratio(4), 0.0] + [teeth_ratio(k) for k in pick] + [teeth_ratio(sixth), teeth_ratio(fi)]
     kmh = lambda ov: gm.PARAMS["rpm_r"] * 2 * math.pi / 60 / ov * 3.6
-    notes.append("gears (top speed, reference -> Classic's nearest teeth): " +
+    notes.append("gears (top speed, garage -> the classic nearest teeth): " +
                  ", ".join(f"{kmh(w):.0f}->{kmh(teeth_ratio(k) * teeth_ratio(fi)):.0f}" for k, w in zip(pick, want)) +
                  f" km/h, final {CLASSIC_TEETH[fi][1]}/{CLASSIC_TEETH[fi][0]}")
 
@@ -218,7 +243,7 @@ def export(K, session, arb_median=None):
                                                    f"range -> {rate[i]}")
     damp = lambda c: int(min(max(round(1 + c / 12 * 4), 1), 5))
     camber = [round(min(max(c, -3.0), 3.0), 2) for c in D["camber"]]
-    toe = [round(D["toe_front"] / 25.4, 3), round(K["toe_rear"] / 25.4, 3)]
+    toe = [round(mm_to_classic_toe(D["toe_front"], 0, crossply), 3), round(mm_to_classic_toe(K["toe_rear"], 1, crossply), 3)]
 
     med = arb_median or CLASSIC_ARB_MEDIAN
     arb = [150.0, 150.0]
@@ -329,6 +354,35 @@ def find_classic_setups(car, track, root=None):
             out.append((os.path.splitext(fn)[0], p, mod))
     out.sort(key=lambda e: (e[0].lower(), e[2]))
     return out
+
+CROSSPLY_MOD = "xp"
+CROSSPLY_MODS = ("xp", "67")
+CROSSPLY_PREFER = ("julia_", "dp2", "dark 67v")
+def crossply_mod_default(car, root=None):
+    """The cross-ply mod's default setup file for car (setups/setupXP/setuxp.<ext> in the Classic folder), or None."""
+    import glob, os
+    ext = CLASSIC_SETUP_EXT.get(car)
+    root = root or classic_setup_root()
+    if not ext:
+        return None
+    for gdir in (os.path.join(os.path.dirname(root), "WP", "drive_c", "Vendor", "Classic"),
+                 os.path.join(os.path.dirname(root), "Classic"), os.path.join(root, "..", "Classic")):
+        for p in glob.glob(os.path.join(gdir, "setups", "*")):
+            if os.path.basename(p).lower() == "setupxp":
+                for f in os.listdir(p):
+                    if f.lower() == "setuxp" + ext:
+                        return os.path.join(p, f)
+    return None
+
+def crossply_setup(car, track, root=None):
+    """-> (path, label) of the setup a cross-ply car starts on, or (None, None)."""
+    cands = [(stem, path, mod) for stem, path, mod in find_classic_setups(car, track, root) if mod in CROSSPLY_MODS]
+    for pre in CROSSPLY_PREFER + ("",):
+        for stem, path, mod in cands:
+            if stem.lower().startswith(pre):
+                return path, f"{stem} [{mod}]"
+    p = crossply_mod_default(car, root)
+    return (p, f"setuxp [{CROSSPLY_MOD} default]") if p else (None, None)
 
 def classic_setup_summary(path):
     """One line for the list's tooltip: overall top gear, final drive, pressures, wheel rates, bars, fuel."""

@@ -5,7 +5,8 @@ const TT_AIR    = 25.6
 const TT_TRACK  = 39.8
 
 const TT_WORK   = parse(Float64, get(ENV, "JM_TYRETEMP_WORK", "54"))
-const TT_COLD   = parse(Float64, get(ENV, "JM_TYRETEMP_COLD", "0.19"))
+
+const TT_COLD   = parse(Float64, get(ENV, "JM_TYRETEMP_COLD", "0.06"))
 const TT_CEXP   = parse(Float64, get(ENV, "JM_TYRETEMP_CEXP", "1.0"))
 const TT_HOT    = 100.0
 const TT_T0     = let e = get(ENV, "JM_TYRE_T0", "")
@@ -43,7 +44,9 @@ tt_record!(buf) = (for A in (TT_SURF, TT_CARC), w in 1:4, z in 1:3; push!(buf, F
 const TT_MG4  = 617.0*9.80665/4
 const AD_TT_EXP = parse(Float64, get(ENV, "JM_AD_TT_EXP", "2.0"))
 
-tt_reset!(T0 = TT_T0) = (fill!(TT_SURF, T0); fill!(TT_CARC, T0); fill!(TT_MU, 1.0); fill!(TT_WEAR, 1.0); TT_DIST[] = 0.0; nothing)
+tt_reset!(T0 = TT_T0) = (fill!(TT_SURF, T0); fill!(TT_CARC, T0); fill!(TT_MU, 1.0); fill!(TT_WEAR, 1.0); TT_DIST[] = 0.0;
+                         isdefined(@__MODULE__, :CPT_TYRES) && empty!(CPT_TYRES);
+                         isdefined(@__MODULE__, :AI_CPT) && empty!(AI_CPT); nothing)
 
 const TT_WET_COLD = get(ENV, "JM_TT_WET_COLD", "0") != "0"
 "Grip factor for a mean carcass temperature (1.0 warm; cold and overheated less). `wet` > 1: no cold loss (TD261104-3)."
@@ -89,6 +92,83 @@ function tt_step!(tc, v::Float64, dt::Float64, wet::Int)
         end
         TT_MU[i] = tt_mu(mc, wet)
     end
+    nothing
+end
+
+const CPT_ON = isdefined(DriveRT3D, :cpx_access) && DriveRT3D.use_crossply() && get(ENV, "JM_CPT", "1") != "0"
+const CPT_T0 = let e = get(ENV, "JM_TYRE_T0", "")
+    e == "warm" ? 400.0 : (x = tryparse(Float64, e); x === nothing ? 295.0 : x + 273.15)
+end
+const CPT_TYRES = Any[]
+
+const CPT_TEAM = Ref(get(Dict("lotus" => :Lotus, "eagle" => :Eagle, "ferrari" => :Ferrari, "brabham" => :Brabham, "cooper" => :Cooper,
+                              "honda" => :Honda, "brm" => :BRM), lowercase(strip(get(ENV, "JM_PLAYER_CAR", "lotus"))), :Lotus))
+"One cross-ply thermal step of the player's car `cs` (each tyre's slip state read from the model); sets TT_MU and the band's zones."
+function cpt_car_step!(cs, v::Float64, dt::Float64)
+    (dt > 0 && isfinite(v)) || return nothing
+    acc = DriveRT3D.cpx_access(cs); acc === nothing && return nothing
+    ch = DriveRT3D.CHASSIS[]
+    if isempty(CPT_TYRES)
+        pr = (hasproperty(ch, :pressure) && ch.pressure !== nothing) ? ch.pressure : nothing
+        for i in 1:4
+            o = DriveRT3D.crossply_obj(CPT_TEAM[], i)
+            push!(CPT_TYRES, DriveRT3D.CPTyre(o; pcold = pr === nothing ? o.p_cold_dflt : pr[i]/6.894757, T0 = CPT_T0))
+        end
+        println("  [tyretemp] cross-ply cold pressures ", join((round(t.pcold, digits = 1) for t in CPT_TYRES), "/"), " psi"); flush(stdout)
+    end
+    a = acc[1](cs.integ)
+    dt = min(dt, 0.1); V = max(abs(v), 1.0)
+    for i in 1:4
+        α = clamp(a[i], -1.4, 1.4); κ = a[4+i]; Dd = a[8+i]; Fz = a[12+i]; Fx = a[16+i]; Fy = a[20+i]
+        vsx = κ*V; vy = tan(α)*V
+        cam = ch.camber === nothing ? 0.0 : ch.camber[i]
+        ty = CPT_TYRES[i]
+        DriveRT3D.cpt_step!(ty, i, Fx, Fy, Fz, Dd, vsx, vy, V + vsx, abs(v), dt; camber = cam)
+        acc[2][i](cs.integ, ty.kp)
+        TT_MU[i] = TT_GRIP ? ty.grip : 1.0
+        for z in 1:3; TT_SURF[i, z] = ty.Ts[z] - 273.15; TT_CARC[i, z] = ty.Tc[z] - 273.15; end
+    end
+    nothing
+end
+CPT_ON && println("  [tyretemp] CROSS-PLY thermal model (the classic sim's): start ", round(CPT_T0 - 273.15, digits = 1),
+                  " C, full grip at 127 C on the hottest tread zone (JM_CPT=0: the radial law)")
+
+const AI_WETGRIP = get(ENV, "JM_AI_WETGRIP", "1") != "0"
+const AI_CPT_ON = CPT_ON && get(ENV, "JM_AI_CPT", "1") != "0"
+const AI_CPT = Dict{Int,Vector{Any}}()
+const AI_CPT_DIAG = parse(Float64, get(ENV, "JM_AI_CPT_DIAG", "0")); const AI_CPT_N = Ref(0)
+const AI_TEAMS = Dict("lotus" => :Lotus, "eagle" => :Eagle, "ferrari" => :Ferrari, "brabham" => :Brabham, "cooper" => :Cooper,
+                      "honda" => :Honda, "brm" => :BRM)
+"After AI car i's physics step: its tyres' grip (the wet, and on cross-ply its tyre temperatures). `chassis` = its car's name."
+function ai_grip_step!(i::Int, pc, v::Float64, dt::Float64, chassis::AbstractString)
+    w = (AI_WETGRIP && WET_A != 1.0) ? wet_mu(v) : 1.0
+    g1 = g2 = g3 = g4 = 1.0
+    if AI_CPT_ON && dt > 0 && isfinite(v)
+        acc = DriveRT3D.cpx_access(pc)
+        if acc !== nothing
+            T = get!(AI_CPT, i) do
+                team = get(AI_TEAMS, lowercase(chassis), :Lotus)
+                pc_ = get(AI_PCOLD, lowercase(chassis), nothing)
+                [(o = DriveRT3D.crossply_obj(team, k); DriveRT3D.CPTyre(o; pcold = pc_ === nothing ? o.p_cold_dflt : pc_[k], T0 = CPT_T0)) for k in 1:4]
+            end
+            a = acc[1](pc.integ); V = max(abs(v), 1.0); dt = min(dt, 0.1)
+            for k in 1:4
+                α = clamp(a[k], -1.4, 1.4); κ = a[4+k]; vsx = κ*V
+                DriveRT3D.cpt_step!(T[k], k, a[16+k], a[20+k], a[12+k], a[8+k], vsx, tan(α)*V, V + vsx, abs(v), dt)
+                acc[2][k](pc.integ, T[k].kp)
+            end
+            g1, g2, g3, g4 = T[1].grip, T[2].grip, T[3].grip, T[4].grip
+            if AI_CPT_DIAG > 0 && i == 1 && (AI_CPT_N[] += 1) % round(Int, 60*AI_CPT_DIAG) == 0
+                r(x) = round(Int, x - 273.15)
+                println("  [aitemp] AI 1 (", chassis, ") carcass ", join((join(r.(t.Tc), "/") for t in T), "  "), "  tread max ",
+                        r(maximum(maximum(t.Ts) for t in T)), " C  grip ", join((round(t.grip, digits = 3) for t in T), "/"),
+                        "  wet x", round(w, digits = 2)); flush(stdout)
+            end
+        end
+    end
+    (w == 1.0 && !AI_CPT_ON) && return nothing
+    DriveRT3D.wheelmu3d!(pc, w*g1, w*g2, w*g3, w*g4)
+    (AI_WETGRIP && WET_MUX != 1.0) && DriveRT3D.wheelmux3d!(pc, WET_MUX)
     nothing
 end
 

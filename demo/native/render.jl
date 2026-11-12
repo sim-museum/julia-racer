@@ -113,7 +113,7 @@ const FSRC = """
 in vec3 vN; in vec3 vC; in vec2 vUV; in vec3 vWorld; in vec4 vLS; out vec4 o;
 uniform vec3 uLightDir; uniform sampler2D uTex; uniform int uHasTex; uniform float uBright;
 uniform vec3 uCamPos; uniform vec3 uFogCol; uniform float uFogNear; uniform float uFogFar;
-uniform sampler2D uShadow; uniform float uShadowTexel; uniform float uSpec; uniform int uBackFlip; uniform int uMirrorPass;
+uniform sampler2D uShadow; uniform float uShadowTexel; uniform float uSpec; uniform int uBackFlip; uniform int uMirrorPass; uniform int uGroundCull;
 uniform float uWet;       // WETLOOK-1: 0 dry .. 1 wet road (sheen: darker asphalt, grazing sky reflection, soft glint)
 uniform float uAmbFill;   // flat fill light (Classic pre-lit cockpit interior — lifts self-shadowed faces)
 uniform int uFlatOn; uniform vec2 uFlat;   // SHADE-1: Classic-like near-flat object light: base*(uFlat.x + uFlat.y*sun)
@@ -177,6 +177,10 @@ float shadow(vec3 N){
 void main(){
   float uvj = dFdx(vUV).x*dFdy(vUV).y - dFdx(vUV).y*dFdy(vUV).x;   // (before any discard: derivatives need the whole quad)
   if(uMaxDist > 0.0 && length(vWorld-uCamPos) > uMaxDist) discard;
+  if(uGroundCull == 1) {   // TD261110-5: ground seen from below (face normal turned to the eye points down > 45 deg)
+    vec3 ng = cross(dFdx(vWorld), dFdy(vWorld)); float lg = length(ng);
+    if(lg > 1e-12) { ng /= lg; if(dot(ng, uCamPos - vWorld) < 0.0) ng = -ng; if(ng.y < -0.7071) discard; }
+  }
   // un-mirror back-facing sign text -- TD261029-5 (3): only a back face whose texture actually READS mirrored. The sign of
   // the screen-space UV Jacobian says so (readable: u rightward, v downward -> negative; the mirror passes' X-flipped
   // projection inverts it). Zandvoort's grandstand front (gstand/gfront) has a panel wound away from the road whose UVs

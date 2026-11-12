@@ -6,6 +6,11 @@ using ModelingToolkit: t_nounits as t, D_nounits as D
 include("tyre_law.jl")
 include("brush_tyre.jl")
 
+const HAVE_CROSSPLY = isfile(joinpath(@__DIR__, "crossply_tyre.jl")) && isfile(joinpath(@__DIR__, "..", "crossply_data.jl"))
+HAVE_CROSSPLY && include(joinpath(@__DIR__, "crossply_tyre.jl"))
+"TYRECHOICE-1: JM_TYRE=crossply builds the cross-ply tyre (read when the car is built, not frozen at compile time)."
+use_crossply() = HAVE_CROSSPLY && lowercase(get(ENV, "JM_TYRE", "radial")) == "crossply"
+
 const TYRE_PC = haskey(ENV, "JM_TYRE_PC")
 
 const TYRE_KMU2 = haskey(ENV, "JM_TYRE_KMU2")

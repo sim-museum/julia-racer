@@ -677,7 +677,7 @@ class AnalyserWindow(QDialog):
         self._fill_rows(allaps, best)
         lv.addWidget(self.table, 1)
         add_b = QPushButton("Add replay…")
-        add_b.setToolTip("Load another replay of this track: its laps join the list, to compare with these (as Classic Replay Analyser)")
+        add_b.setToolTip("Load another replay of this track: its laps join the list, to compare with these")
         add_b.clicked.connect(self._add_replay); lv.addWidget(add_b)
         self.hint = QLabel("Tick up to five laps. Wheel zooms, drag pans, double-click resets."); self.hint.setObjectName("hint")
         self.hint.setWordWrap(True); lv.addWidget(self.hint)

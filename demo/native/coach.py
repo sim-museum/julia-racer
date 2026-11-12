@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPlainTextEdit, QPushB
 import analyser as A
 
 TIMEOUT_S = 240
-SETUPS = {"default": "reference default", "ww103": "WW103 fast loose (Wolfgang Wagner)"}
+SETUPS = {"default": "Default setup", "ww103": "WW103 fast loose (Wolfgang Wagner)"}
 
 def claude_cli():
     return shutil.which("claude")
@@ -156,7 +156,7 @@ def guide_block(rep, you, n_advice=3, advice_chars=700):
 
 PROMPT = ("You are a racing driving coach for Julia Racer: a 1967 Grand Prix car (the summary names which: about 400 hp, no "
           "wings, narrow hard tyres) on "
-          "the classic game circuits, with physics fitted to reference telemetry. Below is a numeric summary of one of "
+          "classic 1967 circuits, with physics fitted to measured telemetry. Below is a numeric summary of one of "
           "the driver's sessions compared with a faster or reference lap. Give the three changes that would gain the most "
           "time, each tied to named corners and to the numbers (braking point, minimum speed, throttle application, "
           "line), and say what to try on the next lap. Then one sentence on consistency. Be concrete and brief "

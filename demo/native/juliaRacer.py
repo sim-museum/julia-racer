@@ -173,15 +173,16 @@ def classic_tip(path):
             tip = e["tip"] if e is not None else classic_setup.classic_setup_summary(path)
         except Exception:
             tip = ""
-        tip += ("\nAdjusted to reference's garage:\n  " + "\n  ".join(notes)) if notes else "\nImports exactly (nothing outside reference's ranges)."
+        tip += ("\nAdjusted to the garage's ranges:\n  " + "\n  ".join(notes)) if notes else "\nImports exactly (nothing outside the garage's ranges)."
         _CLASSIC_TIPS[key] = tip
     return _CLASSIC_TIPS[key]
 
-def classic_import(path, write=True):
+def classic_import(path, write=True, crossply=False):
     """SETUPPICK-1: a Classic setup translated onto the reference default's knobs (classic_setup.translate, SETUPIO-1's rules),
-    cached as <garage>/classic/<md5>.toml (a subfolder: not one of the saved setups) -> (toml path, name, notes) or None."""
+    cached as <garage>/classic/<md5>.toml (a subfolder: not one of the saved setups) -> (toml path, name, notes) or None.
+    crossply (TYRECHOICE-1 S7): for the cross-ply tyre -- its own pressures kept (<md5>_xp.toml)."""
     import hashlib
-    e = classic_setup.shipped_classic_entry(path)
+    e = None if crossply else classic_setup.shipped_classic_entry(path)
     if e is not None:
         return (path, "Classic " + e["stem"], e["notes"])
     try:
@@ -189,12 +190,15 @@ def classic_import(path, write=True):
             b = fh.read()
         d = os.path.join(garage_dir(), "classic")
         os.makedirs(d, exist_ok=True)
-        out = os.path.join(d, hashlib.md5(b).hexdigest() + ".toml")
+        out = os.path.join(d, hashlib.md5(b).hexdigest() + ("_xp3" if crossply else "") + ".toml")
         g = classic_setup.decode_kj1(b)
         med = gm.load_toml().get("classic", {}).get("arb_median")
-        K, notes = classic_setup.translate(g, gm.sessions()["default"]["knobs"], arb_median=tuple(med) if med else None)
+
+        base = "ww103" if os.path.basename(path).lower().startswith("julia_ww103") else "default"
+        K, notes = classic_setup.translate(g, gm.sessions()[base]["knobs"], arb_median=tuple(med) if med else None,
+                                       crossply=crossply, car=classic_setup.car_of_file(path))
         if write and not os.path.exists(out):
-            gm.write_garage_file(out, K, base="default")
+            gm.write_garage_file(out, K, base=base)
         return (out, "Classic " + os.path.splitext(os.path.basename(path))[0], notes)
     except Exception:
         return None
@@ -214,7 +218,7 @@ HUD_FLAGS = (
      "your last one at the same point of the track, right in green while it is faster. Not shown on the first lap."),
     ("hud/timing", "JM_HUD_TIMING", "Sector times and lap count",
      "Each sector's time and its gap to your best sector this session, the lap number, your race position and\n"
-     "your optimal lap (the sum of your best sectors). Monza and Watkins Glen use reference's own sectors."),
+     "your optimal lap (the sum of your best sectors). Monza and Watkins Glen use the measured cars' own sectors."),
     ("hud/trackmap", "JM_HUD_MAP", "Track map with every car (races)",
      "In a race: the circuit with a numbered disc per car at its race position; yours is the larger one with a\n"
      "white ring."),
@@ -644,8 +648,8 @@ class CalibrateTab(QWidget):
         self.prof_r = QRadioButton("Saved profile:")
         self.mode_g = QButtonGroup(self)
         self.mode_g.addButton(self.auto_r); self.mode_g.addButton(self.prof_r)
-        autol = QLabel("The game finds the controller you plug in and uses its own calibration -- as Classic and reference "
-                       "do. A Thrustmaster TX or a Logitech Extreme 3D Pro works without one; any other controller: "
+        autol = QLabel("The game finds the controller you plug in and uses its own calibration -- as the classic "
+                       "sims do. A Thrustmaster TX or a Logitech Extreme 3D Pro works without one; any other controller: "
                        "run the wizard below once.")
         autol.setWordWrap(True); autol.setStyleSheet("color:#888")
         self.profile = QComboBox()
@@ -1129,9 +1133,9 @@ class DriveTab(QWidget):
         form.addWidget(self.ai_pct_l, 4, 0)
         self.ai_pct = QSpinBox(); self.ai_pct.setRange(30, 200); self.ai_pct.setValue(60)
         self.ai_pct.setSuffix(" %")
-        self.ai_pct.setToolTip("Field pace as a % of the track's Classicrank reference lap time: 100% = the "
-                               "fastest AI car hits the Classicrank time for this circuit. Auto-preset when you "
-                               "pick a track to Classicrank/your-best-lap·100 (so the fastest AI matches your "
+        self.ai_pct.setToolTip("Field pace as a % of the track's reference lap time: 100% = the "
+                               "fastest AI car hits the reference time for this circuit. Auto-preset when you "
+                               "pick a track to reference/your-best-lap·100 (so the fastest AI matches your "
                                "best lap); 50% if you've no recorded lap yet. Edit it freely.")
         form.addWidget(self.ai_pct, 4, 1)
         self.ai_pct_note = QLabel("")
@@ -1149,11 +1153,11 @@ class DriveTab(QWidget):
             self.wet.addItem(label, lvl)
         i = self.wet.findData(str(st.value("session/wetness", "1")))
         self.wet.setCurrentIndex(i if i >= 0 else 0)
-        self.wet.setToolTip("Road moisture, as reference's menu (measured from your 31 October Monza sessions). The tyres grip\n"
+        self.wet.setToolTip("Road moisture, in seven levels (measured from your 31 October Monza sessions). The tyres grip\n"
                             "less, and less the faster you go -- tyre grip against dry at 70 / 215 km/h:\n"
                             "  Very light 93 % / 86 %   Light 91 % / 74 %   Moderate 89 % / 62 %   Extremely wet 88 % / 27 %\n"
                             "Braking and traction lose a further 14-20 %. Overcast sky, road sheen and spray grow with the\n"
-                            "level; the AI drives slower to match. Not on the skidpad (reference allows no moisture there).")
+                            "level; the AI drives slower to match. Not on the skidpad (no wet measurements there).")
         self.wet.currentIndexChanged.connect(lambda _: st.setValue("session/wetness", self.wet.currentData()))
         form.addWidget(self.wet, 7, 1, 1, 2)
         self.track.currentIndexChanged.connect(lambda i: self.wet.setEnabled(i != 1))
@@ -1187,7 +1191,7 @@ class DriveTab(QWidget):
         form.addWidget(QLabel("Incidents: black flag at / DSQ at:"), 10, 0)
         self.inclim = QSpinBox(); self.inclim.setRange(0, 99); self.inclim.setSuffix("x")
         self.inclim.setValue(int(st.value("session/inc_limit", 15)))
-        self.inclim.setToolTip("reference's incident points, the same for every driver (you and the AI): 0x light contact, 1x off the\n"
+        self.inclim.setToolTip("Incident points, the same for every driver (you and the AI): 0x light contact, 1x off the\n"
                                "track, 2x a wall or a spin, 4x car-to-car contact (both drivers). At this many the black flag:\n"
                                "drive through the pit lane under 80 km/h within 3 laps (again every 7x more), or you are disqualified.\n"
                                "A clear-cut dive into a corner another car owned is a black flag at once. 0 = no penalties.")
@@ -1210,7 +1214,7 @@ class DriveTab(QWidget):
         i = self.playercar.findData(str(st.value("car/player", "lotus")))
         self.playercar.setCurrentIndex(i if i >= 0 else 0)
         self.playercar.setToolTip("The car you drive -- its body, wheels, cockpit and physics. The AI field is the six others.\n"
-                                  "Each car is the reference-fitted Lotus 49 model with its own mass, wheelbase, tracks, engine\n"
+                                  "Each car is the telemetry-fitted Lotus 49 model with its own mass, wheelbase, tracks, engine\n"
                                   "power and rev band, and gearing (the real 1967 cars' published figures, doc/CARSPECS_1967.md).")
         self.playercar.currentIndexChanged.connect(lambda _: st.setValue("car/player", self.playercar.currentData()))
         self.playercar.currentIndexChanged.connect(lambda _: self.reload_setups() if hasattr(self, "carsetup") else None)
@@ -1219,19 +1223,19 @@ class DriveTab(QWidget):
         self._session_car = None
         self.car_note = QLabel(""); self.car_note.setWordWrap(True); self.car_note.setStyleSheet("color: #e0b040;")
         self.car_note.hide()
-        cform.addWidget(self.car_note, 4, 0, 1, 2)
+        cform.addWidget(self.car_note, 5, 0, 1, 2)
         self.playercar.currentIndexChanged.connect(lambda _: self._car_note_update())
 
         cform.addWidget(QLabel("Setup:"), 1, 0)
         self.carsetup = QComboBox()
 
         self.reload_setups(select=st.value("car/setup_choice", None), fallback=int(st.value("car/setup", 0)))
-        self.carsetup.setToolTip("reference default: the Lotus 49 setup Julia has always raced.\n"
-                                 "WW103 fast loose: Wolfgang Wagner's Classic Watkins Glen setup, driven in reference "
+        self.carsetup.setToolTip("Default setup: the Lotus 49 setup Julia has always raced.\n"
+                                 "WW103 fast loose: Wolfgang Wagner's classic Watkins Glen setup, measured "
                                  "(session 261005) -- soft front springs, stiff rear bar, 35° drive ramp (the diff "
                                  "locks under power), front toe-out, long gearing. Loose on power, controllable at speed.\n"
-                                 "Classic: …  every Classic setup on this PC for this car and track (~/sgl/THU/INSTALL), "
-                                 "translated to reference's knobs as the Garage's Classic import does (hover one for its "
+                                 "Classic: …  every classic-sim setup on this PC for this car and track, "
+                                 "translated to the garage's knobs as the Garage's classic import does (hover one for its "
                                  "numbers).")
         self.carsetup.currentIndexChanged.connect(self._remember_setup)
         cform.addWidget(self.carsetup, 1, 1)
@@ -1247,11 +1251,22 @@ class DriveTab(QWidget):
         self.fuel = QComboBox()
         self.fuel.addItems(["Race distance + 2 laps", "Full tank (179.5 L)"])
         self.fuel.setToolTip("Race distance + 2 laps: enough for the race's laps (practice: 10) plus two, as the "
-                             "reference burn measured on the Lotus 49.\nFull tank: 179.5 L, about 100 kg more than a "
+                             "burn measured on the Lotus 49.\nFull tank: 179.5 L, about 100 kg more than a "
                              "short race -- the car is heavier, softer and slower until it burns off.")
         self.fuel.setCurrentIndex(min(max(int(st.value("car/fuel", 0)), 0), 1))
         self.fuel.currentIndexChanged.connect(lambda i: QSettings("juliaRacer", "launcher").setValue("car/fuel", i))
         cform.addWidget(self.fuel, 3, 1)
+
+        self.tyre_l = QLabel("Tyres:"); cform.addWidget(self.tyre_l, 4, 0)
+        self.tyre = QComboBox()
+        self.tyre.addItem("Radial", "radial"); self.tyre.addItem("Cross-ply", "crossply")
+        self.tyre.setToolTip("Radial: the tyre fitted to the measured Lotus 49 -- grips up to small slip angles, then lets go.\n"
+                             "Cross-ply: the 1960s construction -- softer, peaks at much bigger slip angles (~17°), so the car\n"
+                             "drifts on all four wheels near the limit and slides more progressively.")
+        i = self.tyre.findData(str(st.value("car/tyre", "radial"))); self.tyre.setCurrentIndex(i if i >= 0 else 0)
+        self.tyre.currentIndexChanged.connect(self._tyre_changed)
+        cform.addWidget(self.tyre, 4, 1)
+        has_xp = _crossply_present(); self.tyre_l.setVisible(has_xp); self.tyre.setVisible(has_xp)
         cform.setColumnStretch(1, 1)
         cform.setRowStretch(3, 1)
 
@@ -1260,7 +1275,7 @@ class DriveTab(QWidget):
 
         self.noffb = QCheckBox("Turn force feedback off")
         self.noffb.setToolTip("JM_NOFFB")
-        self.ibt = QCheckBox("Record reference-format telemetry (.ibt) to data/juliaracer/")
+        self.ibt = QCheckBox("Record telemetry (.ibt) to data/juliaracer/")
         self.replay = QCheckBox("Record a replay of every session (all cars) to data/juliaracer/")
         self.replay.setToolTip("Saves a .jmr recording of every car each session -- watch it from the Replays tab.")
         self.d2 = QCheckBox("Simplified 2-D physics (no jumps, lighter on slow PCs)")
@@ -1427,9 +1442,9 @@ class DriveTab(QWidget):
             cb = QCheckBox(text); cb.setChecked(str(self._settings.value(key, "true")) == "true"); cb.setToolTip(tip)
             lay.addWidget(cb, row, 0, 1, 3); self.gfx_hud[key] = cb
 
-        self.gfx_spect = QCheckBox("Spectators, where they stand well off the road (as in Classic)")
+        self.gfx_spect = QCheckBox("Spectators, where they stand well off the road")
         self.gfx_spect.setChecked(str(self._settings.value("scene/spectators", "false")) == "true")
-        self.gfx_spect.setToolTip("Classic's standing spectators, kept only where they are more than 4 m beyond the racing\n"
+        self.gfx_spect.setToolTip("The circuits' standing spectators, kept only where they are more than 4 m beyond the racing\n"
                                   "surface and on the ground. Off: none at all (the rule since 27 August).")
         lay.addWidget(self.gfx_spect, 3 + len(HUD_FLAGS), 0, 1, 3)
         return g
@@ -1644,19 +1659,25 @@ class DriveTab(QWidget):
             if self.ai.value() == 0:
                 self.ai.setValue(6)
 
-    def _track_changed(self, idx):
-        """B: pre-set AI-speed % to Classicrank / your-most-recent-race-average · 100 (best lap, then 50%, as fallback)."""
+    def _track_changed(self, idx, after_session=False):
+        """B: pre-set AI-speed % to Classicrank / your-most-recent-race-average · 100 (best lap, then 50%, as fallback).
+        TD261109-1 (PO 2026-11-09: "it changed AI speed from the 65% I had entered to 78% without asking me"): after a
+        session the preset is re-applied only if the field still holds the last preset -- a % the player typed stays."""
         key = TRACK_KEYS[idx] if 0 <= idx < len(TRACK_KEYS) else "zandvoort"
-        self.ai_pct.setValue(preset_ai_pct(key))
+        p = preset_ai_pct(key)
+        typed = after_session and self.ai_pct.value() != getattr(self, "_ai_preset", None)
+        if not typed:
+            self.ai_pct.setValue(p)
+            self._ai_preset = self.ai_pct.value()
 
         ref = REF_LAP.get(key)
         ok = lambda t: bool(t) and t > 0 and (not ref or t >= 0.5 * ref)
         recent = human_recents().get(key); recent = recent if ok(recent) else None
         best = human_bests().get(key);     best = best if ok(best) else None
         if recent:
-            self.ai_pct_note.setText(f"≈ your recent avg {self._fmt(recent)} vs Classicrank {self._fmt(REF_LAP.get(key,0))}")
+            self.ai_pct_note.setText(f"≈ your recent avg {self._fmt(recent)} vs reference {self._fmt(REF_LAP.get(key,0))}")
         elif best:
-            self.ai_pct_note.setText(f"≈ your best {self._fmt(best)} vs Classicrank {self._fmt(REF_LAP.get(key,0))} (race for an avg)")
+            self.ai_pct_note.setText(f"≈ your best {self._fmt(best)} vs reference {self._fmt(REF_LAP.get(key,0))} (race for an avg)")
         else:
             self.ai_pct_note.setText("no recorded lap yet → 50%")
 
@@ -1677,7 +1698,7 @@ class DriveTab(QWidget):
         car = (self.playercar.currentData() if hasattr(self, "playercar") else None) or "lotus"
         ti = self.track.currentIndex() if hasattr(self, "track") else -1
         tk = TRACK_KEYS[ti] if 0 <= ti < len(TRACK_KEYS) else None
-        self.carsetup.addItem("reference default" if car == "lotus" else "Default setup", "default")
+        self.carsetup.addItem("Default setup", "default")
         if car == "lotus":
             self.carsetup.addItem("WW103 fast loose (Wolfgang Wagner, Watkins Glen)", "ww103")
         saved = [(n, setup_tags(p, n)[1], b) for n, p, b in named_setups(car)]
@@ -1692,6 +1713,9 @@ class DriveTab(QWidget):
                 self.carsetup.addItem(f"Classic: {stem}  [{mod}, {TRACK_TITLES.get(gt, gt)}]", "classic:" + path)
                 self.carsetup.setItemData(self.carsetup.count() - 1, f"{path}\n{classic_tip(path)}", Qt.ItemDataRole.ToolTipRole)
         k = self.carsetup.findData(cur) if cur is not None else -1
+        if k < 0 and self.crossply_on():
+            xk = self._crossply_default_key()
+            k = self.carsetup.findData(xk) if xk else -1
         if k < 0:
             k = max(self.carsetup.findData("ww103" if int(fallback) == 1 else "default"), 0)
         self.carsetup.setCurrentIndex(k)
@@ -1703,6 +1727,40 @@ class DriveTab(QWidget):
             self.carsetup.currentIndexChanged.emit(self.carsetup.currentIndex())
         self._setup_shown = self.carsetup.currentData()
 
+    def crossply_on(self):
+        """TYRECHOICE-1: the cross-ply tyre is chosen (and this tree carries it)."""
+        return bool(getattr(self, "tyre", None) is not None and _crossply_present() and self.tyre.currentData() == "crossply")
+
+    def _crossply_default_key(self):
+        """TYRECHOICE-1 S7: the Setup list's key of the Classic setup a cross-ply car starts on (added to the list if it is the
+        mod's track-independent default, which the per-track search does not list), or None."""
+        car = (self.playercar.currentData() if hasattr(self, "playercar") else None) or "lotus"
+        ti = self.track.currentIndex() if hasattr(self, "track") else -1
+        tk = TRACK_KEYS[ti] if 0 <= ti < len(TRACK_KEYS) else None
+        path, label = classic_setup.crossply_setup(car, tk) if tk else (None, None)
+        if not path:
+            return None
+        key = "classic:" + path
+        if self.carsetup.findData(key) < 0:
+            self.carsetup.addItem(f"Classic: {label}", key)
+        return key
+
+    def _tyre_changed(self, _i=None):
+        """TYRECHOICE-1 S7 (PO 2026-11-10: "Use Classic setups - these are designed for cross ply tires"): choosing Cross-ply
+        puts the car on its Classic setup for this track; back to Radial, on the default setup."""
+        QSettings("juliaRacer", "launcher").setValue("car/tyre", self.tyre.currentData())
+        if not hasattr(self, "carsetup"):
+            return
+
+        cur = self.carsetup.currentData() or "default"
+        if self.crossply_on():
+            self.reload_setups()
+            k = self._crossply_default_key() if cur == "default" else None
+            k and self.reload_setups(select=k)
+        elif cur == getattr(self, "_xp_auto_key", None) or cur == "default":
+            self.reload_setups(select="default")
+        self._xp_auto_key = self.carsetup.currentData() if self.crossply_on() and cur == "default" else None
+
     def _remember_setup(self, _i=None):
         st = QSettings("juliaRacer", "launcher")
         st.setValue("car/setup_choice", self.carsetup.currentData())
@@ -1713,7 +1771,7 @@ class DriveTab(QWidget):
         """-> (base session key, saved setup path or None, its name or None)"""
         key = self.carsetup.currentData() or "default"
         if key.startswith("classic:"):
-            r = classic_import(key[len("classic:"):])
+            r = classic_import(key[len("classic:"):], crossply=self.crossply_on())
             return ("default", r[0], r[1]) if r else ("default", None, None)
         if key.startswith("saved:"):
             name = key[len("saved:"):]
@@ -1765,6 +1823,19 @@ class DriveTab(QWidget):
         if gf:
             qenv.insert("JM_GARAGE", gf)
         qenv.insert("JM_FUEL", ["event", "full"][self.fuel.currentIndex()])
+        qenv.insert("JM_TYRE", (self.tyre.currentData() if _crossply_present() else None) or "radial")
+        if self.crossply_on():
+            ti_ = self.track.currentIndex(); tk_ = TRACK_KEYS[ti_] if 0 <= ti_ < len(TRACK_KEYS) else None
+            ap, _ = classic_setup.crossply_setup("lotus", tk_) if tk_ else (None, None)
+            ar = classic_import(ap, crossply=True) if ap else None
+            ar and qenv.insert("JM_AI_GARAGE", ar[0])
+
+            aig = []
+            for _lab, car_ in PLAYER_CARS:
+                cp_, _ = classic_setup.crossply_setup(car_, tk_) if tk_ else (None, None)
+                cr_ = classic_import(cp_, crossply=True) if cp_ else None
+                cr_ and aig.append(f"{car_}={cr_[0]}")
+            aig and qenv.insert("JM_AI_GARAGES", ";".join(aig))
         timing_env(qenv)
         if self.mute.isChecked():
             qenv.insert("JM_NOSOUND", "1")
@@ -1812,6 +1883,7 @@ class DriveTab(QWidget):
             jlargs += ["-J", sysimg]
         jlargs.append("drive_native_mtk.jl")
         self.proc.start(find_julia(), jlargs)
+        launcher_event(f"fresh launch: {self.track.currentText()} {self.mode.currentText()} AI {self.ai.value()} at {self.ai_pct.value()}%")
         self.log.clear()
         self.log.appendPlainText(
             "launching drive_native_mtk.jl … " +
@@ -1867,6 +1939,7 @@ class DriveTab(QWidget):
         self.log.appendPlainText("next race on the track already loaded (no reload) …")
         self.launch_b.setEnabled(False)
         self.stop_b.setEnabled(True)
+        launcher_event(f"warm race sent: {self.track.currentText()} AI {self.ai.value()} at {self.ai_pct.value()}%")
         self.send_warm("race " + fn)
 
     def end_warm(self):
@@ -1886,6 +1959,7 @@ class DriveTab(QWidget):
             try: f.write(text); f.flush()
             except (OSError, ValueError): pass
         if "[warm] holding" in text:
+            launcher_event(f"held (session_closed {getattr(self, '_session_closed', False)}, sim log open {getattr(self, '_sim_log', None) is not None})")
             self._warm = True
             if not getattr(self, "_session_closed", False):
                 self._session_closed = True
@@ -1951,9 +2025,12 @@ class DriveTab(QWidget):
             trk = ["zandvoort", "skidpad", "nurburgring", "watglen", "monza", "spa"][self.track.currentIndex()]
         except (IndexError, AttributeError):
             trk = None
-        keep_run_log(os.path.join(HERE, "last_sim_run.log"), getattr(self, "_launched_at", None), trk)
+        kept = keep_run_log(os.path.join(HERE, "last_sim_run.log"), getattr(self, "_launched_at", None), trk)
+        launcher_event(f"kept log {kept}")
 
     def _done(self):
+        launcher_event(f"process exited (warm_race_req {getattr(self, '_warm_race_req', False)}, session_closed "
+                       f"{getattr(self, '_session_closed', False)}, declined {getattr(self, '_warm_declined', None)!r})")
         self._warm = False
         if getattr(self, "_warm_race_req", False):
             self._warm_race_req = False; self._session_closed = False; self._stopping = False
@@ -2011,13 +2088,31 @@ class DriveTab(QWidget):
             self._sim_log = None
             self._keep_run_log()
 
-        self._track_changed(self.track.currentIndex())
+        self._track_changed(self.track.currentIndex(), after_session=True)
 
         if self.on_result:
             self.on_result(getattr(self, "_result_path", os.path.join(HERE, "last_race_result.txt")))
 
 def _run_log_dir():
     return os.path.join(os.path.dirname(os.path.dirname(HERE)), "data", "juliaracer", "logs")
+
+def _crossply_present():
+    """TYRECHOICE-1: the cross-ply tyre's code and data are in this tree (the development tree; not in the public export)."""
+    src = os.path.normpath(os.path.join(HERE, "..", "..", "JuliaMotorMTK", "src"))
+    return os.path.isfile(os.path.join(src, "components", "crossply_tyre.jl")) and os.path.isfile(os.path.join(src, "crossply_data.jl"))
+
+def launcher_event(msg):
+    """TD261109-1: the launcher's own session events (launch, warm race, decline, hold, exit, kept log), one line each in
+    data/juliaracer/logs/launcher_events.txt -- the 11-09 Watkins Glen race left no log and nothing said which path it took."""
+    try:
+        d = _run_log_dir(); os.makedirs(d, exist_ok=True)
+        p = os.path.join(d, "launcher_events.txt")
+        if os.path.exists(p) and os.path.getsize(p) > 2_000_000:
+            os.replace(p, p + ".old")
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + msg + "\n")
+    except OSError:
+        pass
 
 def keep_run_log(src, launched_at, track, keep=40):
     """TD261013-1 (PO 2026-10-13 test drive): last_sim_run.log is rewritten by every launch, so of an evening's six runs
@@ -2404,8 +2499,8 @@ class Main(QMainWindow):
 
     def _about(self):
         QMessageBox.about(self, "About Julia Racer",
-                          "<b>Julia Racer</b><br>The 1967 Lotus 49 on Classic's circuits, with physics fitted to reference "
-                          "telemetry (ModelingToolkit) and an AI field that drives like Classic's.")
+                          "<b>Julia Racer</b><br>The 1967 Lotus 49 on the classic 1967 circuits, with physics fitted to measured "
+                          "telemetry (ModelingToolkit) and an AI field that drives like the classic sims'.")
 
     def _show_result_tab(self, path):
         """PO: after a race, populate the Race Result tab and switch to it (no modal popup)."""

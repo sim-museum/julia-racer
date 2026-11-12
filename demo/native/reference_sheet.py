@@ -165,7 +165,7 @@ def from_knobs(K, session, name="julia garage", track=""):
     out.append("<H2><U>Differential:</U></H2>")
     out.append(f"Clutch plates:<U>{int(K['diff_plates'])}</U><br>Preload:<U>{float(K['diff_preload']):.0f} Nm</U><br>"
                f"Drive ramp angle:<U>{float(K['diff_drive']):.0f} deg</U><br>Coast ramp angle:<U>{float(K['diff_coast']):.0f} deg</U><br><br>")
-    out.append("<H2><U>Notes:</U></H2>Written by julia racer's Garage tab: the knobs as reference's garage sets them; corner "
+    out.append("<H2><U>Notes:</U></H2>Written by julia racer's Garage tab: the knobs as the garage sets them; corner "
                "weights, ride heights, shock deflections, camber, front toe, cross weight and gear speeds are julia's garage "
-               "model of reference's (the base session's numbers plus the model's change).<br></body></html>")
+               "model (the base session's measured numbers plus the model's change).<br></body></html>")
     return "\n".join(out)

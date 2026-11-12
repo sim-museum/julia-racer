@@ -122,7 +122,7 @@ function car_iscale()
     c = CAR[]; mr = car_mass()/MASS[]; lr = (wheelbase()/WHEELBASE)^2; tr = ((3.0 + c.dtf + c.dtr)/3.0)^2
     (mr*lr, mr*tr, mr*lr)
 end
-car_describe() = (c = CAR[]; c.name == "Lotus" ? "Lotus 49 (the reference car)" :
+car_describe() = (c = CAR[]; c.name == "Lotus" ? "Lotus 49 (the measured car)" :
     string(c.name, ": the Lotus 49 model with mass ", round(car_mass(), digits = 1), " kg (", c.dm >= 0 ? "+" : "", c.dm, "), wheelbase ",
            round(wheelbase(), digits = 3), " m, tracks ", round(1.5 + c.dtf, digits = 3), " / ", round(1.5 + c.dtr, digits = 3),
            " m, engine x", round(c.kP, digits = 3), " power over x", round(c.kR, digits = 3), " rpm (redline ", round(Int, 9500c.kR),
@@ -682,7 +682,8 @@ function build_car3d(; x0 = 0.0, z0 = 0.0, θ0 = 0.0, v0 = 0.0, y0 = 0.0,
     SLOPE_G[] = get(ENV, "JM_SLOPE_GRAVITY", "1") != "0"
     SLOPE_DIAG[] = parse(Float64, get(ENV, "JM_SLOPE_DIAG", "0"))
     sys = mtkcompile(_vehicle_model(brush))
-    println(brush ? "  TYRE (3-D): physics-based brush model (default)" : "  TYRE (3-D): Magic-Formula tyre (JM_MAGIC)")
+    println(brush ? (use_crossply() ? "  TYRE (3-D): CROSS-PLY (JM_TYRE=crossply: the community mod's tyre law and numbers)" :
+                                      "  TYRE (3-D): physics-based brush model (default, radial)") : "  TYRE (3-D): Magic-Formula tyre (JM_MAGIC)")
     sys, prob = _cached_problem(sys, s -> [s.u => v0, s.ωf => v0/0.30, _wheel_u0(s, v0)...,
                                            s.ωe => 209.4, s.X => x0, s.Y => z0, s.ψ => θ0], _phys_jac())
 
@@ -715,10 +716,10 @@ end
 
 """Compile the 3-D car ONCE and build `length(poses)` cars sharing the system (so a field of
 3-D AI doesn't pay N× mtkcompile).  `poses` = Vector of (x0,z0,θ0,v0)."""
-function build_cars3d(poses; brush = !haskey(ENV, "JM_MAGIC"), dt = 1/300, names = nothing)
-    with_lotus(() -> _build_cars3d(poses; brush, dt, names))
+function build_cars3d(poses; brush = !haskey(ENV, "JM_MAGIC"), dt = 1/300, names = nothing, setup_ov = nothing)
+    with_lotus(() -> _build_cars3d(poses; brush, dt, names, setup_ov))
 end
-function _build_cars3d(poses; brush = !haskey(ENV, "JM_MAGIC"), dt = 1/300, names = nothing)
+function _build_cars3d(poses; brush = !haskey(ENV, "JM_MAGIC"), dt = 1/300, names = nothing, setup_ov = nothing)
     SLOPE_G[] = get(ENV, "JM_SLOPE_GRAVITY", "1") != "0"
     SLOPE_DIAG[] = parse(Float64, get(ENV, "JM_SLOPE_DIAG", "0"))
     sys = mtkcompile(DrivenVehicle3D(name = :car, brush = brush, final = FINAL[], m = MASS[], front_frac = FRONT_FRAC[],
@@ -751,6 +752,14 @@ function _build_cars3d(poses; brush = !haskey(ENV, "JM_MAGIC"), dt = 1/300, name
         end
     end
 
+    if setup_ov !== nothing && names !== nothing
+        for nm in unique(String.(names))
+            haskey(setup_ov, nm) || continue
+            ov = haskey(OV, nm) ? copy(OV[nm]) : Dict{String,Float64}()
+            merge!(ov, setup_ov[nm]); OV[nm] = ov
+        end
+    end
+
     for (ip, (x0,z0,θ0,v0)) in enumerate(poses)
         u0map = u0map_(sys, (x0, z0, θ0, v0))
         if ip == 1
@@ -769,7 +778,7 @@ function _build_cars3d(poses; brush = !haskey(ENV, "JM_MAGIC"), dt = 1/300, name
                   x0, 0.0, z0, θ0, v0, 0.0, 0.0, 1, ntuple(_->(0.0,0.0,0.0),4),
                   0.0, 0, 0.0, 0.0, true, 0.0, 0.0, 9.80665, 0.0, RIDE_H[], false, 0.0, 0.0, false, (0.0, 0.0), false, -Inf)
         if names !== nothing && haskey(OV, String(names[length(cars) + 1]))
-            nm = String(names[length(cars) + 1]); nset = set_carphys!(c, CAR_PHYS[nm], OV[nm])
+            nm = String(names[length(cars) + 1]); nset = set_carphys!(c, get(CAR_PHYS, nm, CAR_PHYS["Lotus"]), OV[nm])
             nset == length(OV[nm]) || println("  [aicarphys] WARNING: ", nm, ": ", nset, " of ", length(OV[nm]), " differing parameters found in the compiled model")
         end
         c.s_gr(c.integ, gearratio(c.gear)); getall(integ)

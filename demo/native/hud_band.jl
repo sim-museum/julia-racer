@@ -5,6 +5,8 @@ const MAP_SPAN = parse(Float64, get(ENV, "JM_MAP_SPAN", "2600"))
 const MAP_FOLLOW = Ref(false)
 
 const MAP_ZOOM = Ref(1)
+
+const REP_VIEW = Ref{NTuple{4,Float64}}((0.0, 0.0, 0.0, 0.0))
 const MAP_SPANS = (MAP_SPAN, parse(Float64, get(ENV, "JM_MAP_SPAN_MED", "1000")), parse(Float64, get(ENV, "JM_MAP_SPAN_CLOSE", "350")))
 map_zoom_cycle!() = (MAP_ZOOM[] = MAP_ZOOM[] % 3 + 1; println("  [map] zoom ", ("whole track", "medium", "close up")[MAP_ZOOM[]], " (",
                                                               round(Int, MAP_SPANS[MAP_ZOOM[]]), " m across)"); flush(stdout); nothing)
@@ -113,7 +115,7 @@ end
 """The map in its box at MAP_SPAN metres across: whole and centred if the track fits, else the window around the car at
 (cx, cz) (scissored to the box). Ribbon, start tick, a disc per car (cars = (id, x, z, pos); id 0 = you, ringed)."""
 const MAP_XS = Float64[]; const MAP_YS = Float64[]
-function trackmap_draw_fixed!(bv, tv, font, m::TrackMap, bx, by, bw, bh, cars, sfx, sfz, cx, cz)
+function trackmap_draw_fixed!(bv, tv, font, m::TrackMap, bx, by, bw, bh, cars, sfx, sfz, cx, cz; vid::Int = 0)
     m.ok || return nothing
     ppm = bw/MAP_SPANS[MAP_ZOOM[]]
     tw = m.sc*ppm; th = m.sc/m.aspect*ppm
@@ -135,11 +137,11 @@ function trackmap_draw_fixed!(bv, tv, font, m::TrackMap, bx, by, bw, bh, cars, s
     Render.hquad!(bv, px - 1.5, py - rw, 3.0, 2rw, (0.95, 0.95, 0.95))
     r = clamp(bh/18, 3.5, 11.0)
     for pass in 1:2, (id, x, z, pos) in cars
-        (pass == 2) == (id == 0) || continue
+        (pass == 2) == (id == 0 || id == vid) || continue
         q = map_pt(m, x, z); qx = ox + q[1]*k; qy = oy + q[2]*k
         (bx - r <= qx <= bx + bw + r && by - r <= qy <= by + bh + r) || continue
         rr = id == 0 ? 1.35r : r
-        id == 0 && hdisc!(bv, qx, qy, rr + 2.0, (0.98, 0.98, 0.98))
+        id == vid && hdisc!(bv, qx, qy, rr + 2.0, (0.98, 0.98, 0.98))
         hdisc!(bv, qx, qy, rr, (0.98, 0.78, 0.10))
         if font !== nothing && pos > 0
             t = string(pos); w_ = Render.text_width(font, t)
@@ -161,8 +163,22 @@ function tt_colour(T)
     end
     k[end][2]
 end
-"The tyre's ring colour: tt_colour of its mean surface temperature (TD261029-2)."
-tyre_ring(i) = tt_colour((TT_SURF[i, 1] + TT_SURF[i, 2] + TT_SURF[i, 3])/3)
+
+const CPT_RING_BLUE = (0.10, 0.25, 0.95); const CPT_RING_GREEN = (0.15, 0.95, 0.25); const CPT_RING_RED = (1.0, 0.15, 0.10)
+function cpt_ring(i)
+    o = DriveRT3D.crossply_obj(CPT_TEAM[], i)
+    pc = length(CPT_TYRES) >= i ? CPT_TYRES[i].pcold : o.p_cold_dflt
+    T = (TT_CARC[i, 1] + TT_CARC[i, 2] + TT_CARC[i, 3])/3 + 273.15
+    gP = 1.0 - (pc*T/DriveRT3D.CPT_AMB - o.p_opt)^2*0.00078125
+    gT = 1.0 - 1e-5*(T - o.t_opt)^2
+    gT*gP < 0.985 && return T < o.t_opt ? CPT_RING_BLUE : CPT_RING_RED
+    h = sqrt(max(1.0 - 0.985/gP, 1e-9)/1e-5)
+    x = clamp((T - o.t_opt)/h, -1.0, 1.0)
+    a, b, f = x < 0 ? (CPT_RING_BLUE, CPT_RING_GREEN, 1.0 + x) : (CPT_RING_GREEN, CPT_RING_RED, x)
+    (a[1] + f*(b[1] - a[1]), a[2] + f*(b[2] - a[2]), a[3] + f*(b[3] - a[3]))
+end
+"The tyre's ring colour: tt_colour of its mean surface temperature (TD261029-2); cross-ply: cpt_ring (TD261110-4)."
+tyre_ring(i) = CPT_ON ? cpt_ring(i) : tt_colour((TT_SURF[i, 1] + TT_SURF[i, 2] + TT_SURF[i, 3])/3)
 
 const GAUGE_YEL = (1.0, 0.86, 0.10); const GAUGE_GRN = (0.25, 0.90, 0.30)
 
@@ -270,7 +286,8 @@ function hudband_draw!(cs, W, H, AICARS, best_lap, last_lap, lap_t0, race_done, 
     end
     gtv = empty!(BAND_GT)
     if BAND_GAUGE_ON
-        band_tach!(bv, gtv, L.tach, cs.rpm, cs.gear, cs.v*3.6, DIALV.water, DIALV.oiltemp;
+        rv = REP_VIEW[]; vw = !isempty(REPLAY_FILE_R[]) && rv[1] >= 1
+        band_tach!(bv, gtv, L.tach, vw ? rv[2] : Float64(cs.rpm), vw ? round(Int, rv[3]) : cs.gear, vw ? rv[4] : cs.v*3.6, DIALV.water, DIALV.oiltemp;
                    mode = isempty(REPLAY_FILE_R[]) ? (CTL.auto ? "AUTO" : "MAN") : "")
         st0 = (IS_RACE && !isempty(AICARS)) ? standings() : nothing
         pk = st0 === nothing ? 1 : something(findfirst(e -> e[1] == 0, st0), 1)
@@ -349,7 +366,9 @@ function hudband_draw!(cs, W, H, AICARS, best_lap, last_lap, lap_t0, race_done, 
             end
         end
         sf = line_xz(TRACKMAP, 0.0); mv = empty!(BAND_MV); mt = empty!(BAND_MT)
-        trackmap_draw_fixed!(mv, mt, MAP_NUMS ? FONT : nothing, TRACKMAP, bx, by, bw, bh, cars, sf[1], sf[2], cs.x, cs.z)
+        vid = isempty(REPLAY_FILE_R[]) ? 0 : round(Int, REP_VIEW[][1]); mcx = cs.x; mcz = cs.z
+        vid >= 1 && for c_ in cars; c_[1] == vid && (mcx = c_[2]; mcz = c_[3]); end
+        trackmap_draw_fixed!(mv, mt, MAP_NUMS ? FONT : nothing, TRACKMAP, bx, by, bw, bh, cars, sf[1], sf[2], mcx, mcz; vid = vid)
         glEnable(GL_SCISSOR_TEST); glScissor(round(Int, bx), H - round(Int, by + bh), round(Int, bw), round(Int, bh))
         Render.hud_draw(hudprog, hudvao, hudvbo, mv, W, H)
         Render.text_draw(textprog, textvao, textvbo, FONT, mt, W, H)
